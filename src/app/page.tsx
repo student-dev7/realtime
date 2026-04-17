@@ -1,805 +1,345 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import CHARACTERS from "../data/characters.json";
-import { onAuthStateChanged } from "firebase/auth";
-import { ChatRoomPanel } from "../components/ChatRoomPanel";
+import { useCallback, useEffect, useState } from "react";
+import { getFirestore } from "firebase/firestore";
+import {
+  createRoom,
+  listPublicLobbies,
+} from "@/lib/multiplayer/roomFirestore";
+import type { HandMode, MultiplayerRoomDoc } from "@/lib/multiplayer/types";
 import {
   ensureAnonymousSession,
   getFirebaseAuth,
-} from "../lib/firebaseClient";
-import { useAdminMode } from "@/components/AdminModeProvider";
-import { isAdminUid } from "../lib/adminUids";
-import { validateDisplayName } from "../lib/validateDisplayName";
+} from "@/lib/firebaseClient";
+import { normalizeRoomCodeInput } from "@/lib/multiplayer/roomCode";
+import { validateDisplayName } from "@/lib/validateDisplayName";
+import { GameRulesModal } from "@/components/GameRulesModal";
+import { PlayerNameModal } from "@/components/PlayerNameModal";
 
-type Character = (typeof CHARACTERS)[number];
-
-const MAX_GUESSES = 7;
-/** これ未満では降参不可（API の MIN と一致） */
-const MIN_GUESSES_TO_RESIGN = 4;
 const PLAYER_NAME_KEY = "genshinguesser-player-name";
-const ACCENT = "text-[#ece5d8]";
 
-function normalizeForSearch(s: string) {
-  const t = s.trim().replace(/\s+/g, "");
-  const noLongVowel = t.replace(/ー/g, "");
-  return noLongVowel.replace(/[ァ-ヶ]/g, (ch) =>
-    String.fromCharCode(ch.charCodeAt(0) - 0x60)
-  );
-}
+export default function HomePage() {
+  const [lobbies, setLobbies] = useState<
+    { code: string; data: MultiplayerRoomDoc }[]
+  >([]);
+  const [listError, setListError] = useState<string | null>(null);
+  const [loadingList, setLoadingList] = useState(true);
 
-function getVer(c: Character): number | null {
-  const anyC = c as unknown as { ver?: unknown; version?: unknown };
-  const v = anyC.ver ?? anyC.version;
-  return typeof v === "number" ? v : null;
-}
-
-function pickRandomTarget(list: Character[]): Character {
-  const i = Math.floor(Math.random() * list.length);
-  return list[i]!;
-}
-
-function matchClass(ok: boolean) {
-  return ok
-    ? "border-emerald-500/70 bg-emerald-950/50 text-emerald-100 shadow-[0_0_20px_-6px_rgba(52,211,153,0.45)]"
-    : "border-[#ece5d8]/20 bg-[#12182a]/95 text-[#ece5d8]/95";
-}
-
-type RatingStats = {
-  before: number;
-  after: number;
-  delta: number;
-  alreadySubmitted: boolean;
-  weeklyResetApplied?: boolean;
-  /** 正解キャラの全プレイヤー記録に基づく平均手数（単純平均・サーバー算出） */
-  characterAverageHands?: number;
-};
-
-export default function Home() {
-  const list = CHARACTERS as Character[];
-
-  const [target, setTarget] = useState<Character>(() =>
-    pickRandomTarget(list)
-  );
-  const [roundId, setRoundId] = useState(() =>
-    typeof crypto !== "undefined" ? crypto.randomUUID() : String(Date.now())
-  );
-  const [guesses, setGuesses] = useState<Character[]>([]);
-  const [query, setQuery] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
-  const [playerName, setPlayerName] = useState("");
-  const [nameDraft, setNameDraft] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [rulesOpen, setRulesOpen] = useState(false);
   const [nameModalOpen, setNameModalOpen] = useState(false);
-  const [nameFieldTouched, setNameFieldTouched] = useState(false);
-  const [surrendered, setSurrendered] = useState(false);
-  const [ratingStats, setRatingStats] = useState<RatingStats | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [submitLoading, setSubmitLoading] = useState(false);
-  const [submitRetryKey, setSubmitRetryKey] = useState(0);
-  const submitDoneRoundRef = useRef<string | null>(null);
-  const [chatOpen, setChatOpen] = useState(false);
-  const { showAdminTools } = useAdminMode();
-  const [debugRevealAnswer, setDebugRevealAnswer] = useState(false);
-  const [viewerUid, setViewerUid] = useState<string | null>(null);
 
-  const draftPreview = useMemo(
-    () =>
-      validateDisplayName(nameDraft, {
-        ignoreBadSubstrings: isAdminUid(viewerUid),
-      }),
-    [nameDraft, viewerUid]
-  );
+  const [roomName, setRoomName] = useState("みんなでゲッサー");
+  const [isPublic, setIsPublic] = useState(true);
+  const [joinPassword, setJoinPassword] = useState("");
+  const [maxPlayers, setMaxPlayers] = useState(4);
+  const [handMode, setHandMode] = useState<HandMode>("seven");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [joinErr, setJoinErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    void ensureAnonymousSession().catch(() => {
-      /* 送信時に再試行 */
-    });
-  }, []);
-
-  useEffect(() => {
-    const auth = getFirebaseAuth();
-    setViewerUid(auth.currentUser?.uid ?? null);
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setViewerUid(u?.uid ?? null);
-    });
-    return () => unsub();
-  }, []);
+  const [joinInput, setJoinInput] = useState("");
+  const [joinPwd, setJoinPwd] = useState("");
 
   useEffect(() => {
     try {
       const s = localStorage.getItem(PLAYER_NAME_KEY);
-      if (s) setPlayerName(s);
+      if (s) setDisplayName(s);
     } catch {
       /* ignore */
     }
   }, []);
 
-  useEffect(() => {
+  const nameCheck = validateDisplayName(displayName);
+
+  const refreshList = useCallback(async () => {
+    setListError(null);
+    setLoadingList(true);
     try {
-      localStorage.setItem(PLAYER_NAME_KEY, playerName);
+      await ensureAnonymousSession();
+      const db = getFirestore(getFirebaseAuth().app);
+      const rows = await listPublicLobbies(db);
+      setLobbies(rows);
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingList(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshList();
+  }, [refreshList]);
+
+  const onCreate = async () => {
+    setCreateError(null);
+    const v = validateDisplayName(displayName);
+    if (!v.ok) {
+      setCreateError(v.error);
+      setNameModalOpen(true);
+      return;
+    }
+    setCreating(true);
+    try {
+      await ensureAnonymousSession();
+      const auth = getFirebaseAuth();
+      const uid = auth.currentUser?.uid;
+      if (!uid) throw new Error("ログインに失敗しました");
+      const db = getFirestore(auth.app);
+      const code = await createRoom({
+        db,
+        uid,
+        displayName: v.name,
+        roomName,
+        isPublic,
+        joinPassword,
+        maxPlayers,
+        handMode,
+      });
+      try {
+        localStorage.setItem(PLAYER_NAME_KEY, v.name);
+      } catch {
+        /* ignore */
+      }
+      window.location.href = `/room/${code}`;
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const goJoinByCode = () => {
+    const v = validateDisplayName(displayName);
+    if (!v.ok) {
+      setJoinErr(v.error);
+      setNameModalOpen(true);
+      return;
+    }
+    const code = normalizeRoomCodeInput(joinInput);
+    if (code.length !== 5) {
+      setJoinErr("部屋番号は5文字の英数字で入力してください");
+      return;
+    }
+    setJoinErr(null);
+    try {
+      localStorage.setItem(PLAYER_NAME_KEY, v.name);
     } catch {
       /* ignore */
     }
-  }, [playerName]);
+    const q = joinPwd.trim() ? `?pwd=${encodeURIComponent(joinPwd.trim())}` : "";
+    window.location.href = `/room/${code}${q}`;
+  };
 
-  useEffect(() => {
-    if (!nameModalOpen) return;
-    setNameDraft(playerName);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setNameModalOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [nameModalOpen, playerName]);
-
-  const won = guesses.some((g) => g.name === target.name);
-  const finished =
-    surrendered || won || guesses.length >= MAX_GUESSES;
-
-  const suggestions = useMemo(() => {
-    const qRaw = query.trim();
-    if (!qRaw) return [] as Character[];
-    const q = normalizeForSearch(qRaw);
-    return list.filter((c) => {
-      const nameNorm = normalizeForSearch(c.name);
-      const anyC = c as unknown as { nameHira?: string };
-      const nameHiraNorm = normalizeForSearch(anyC.nameHira ?? "");
-      return (
-        (nameNorm.includes(q) || nameHiraNorm.includes(q)) &&
-        !guesses.some((g) => g.name === c.name)
-      );
-    });
-  }, [query, guesses, list]);
-
-  const submitGuess = useCallback(
-    (c: Character) => {
-      if (finished) return;
-      if (guesses.some((g) => g.name === c.name)) {
-        setMessage("すでに試したキャラです");
-        return;
-      }
-      setMessage(null);
-      setGuesses((g) => [c, ...g]);
-      setQuery("");
-    },
-    [finished, guesses]
-  );
-
-  const canResign = guesses.length >= MIN_GUESSES_TO_RESIGN;
-
-  const resign = useCallback(() => {
-    if (finished) return;
-    if (!canResign) {
-      setMessage("4回予想してから諦められます");
+  const goPublicRoom = (code: string) => {
+    const v = validateDisplayName(displayName);
+    if (!v.ok) {
+      setJoinErr(v.error);
+      setNameModalOpen(true);
       return;
     }
-    setMessage("諦めました");
-    setSurrendered(true);
-    setQuery("");
-  }, [finished, canResign]);
-
-  useEffect(() => {
-    if (!finished) {
-      return;
+    try {
+      localStorage.setItem(PLAYER_NAME_KEY, v.name);
+    } catch {
+      /* ignore */
     }
-    if (submitDoneRoundRef.current === roundId) {
-      return;
-    }
-
-    const guessCount = guesses.length;
-    const handCount = won ? guessCount : 7;
-    let cancelled = false;
-
-    const run = async () => {
-      await ensureAnonymousSession();
-
-      const authForName = getFirebaseAuth();
-      const nameCheck = validateDisplayName(playerName, {
-        ignoreBadSubstrings: isAdminUid(
-          authForName.currentUser?.uid ?? null
-        ),
-      });
-      if (!nameCheck.ok) {
-        if (!cancelled) {
-          setSubmitError(nameCheck.error);
-          setRatingStats(null);
-          setSubmitLoading(false);
-        }
-        return;
-      }
-
-      if (!cancelled) {
-        setSubmitError(null);
-        setSubmitLoading(true);
-      }
-
-      try {
-        const auth = getFirebaseAuth();
-        const idToken = await auth.currentUser!.getIdToken();
-
-        const res = await fetch("/api/submit-result", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            idToken,
-            characterName: target.name,
-            roundId,
-            handCount,
-            guessCount,
-            won,
-            displayName: nameCheck.name,
-            surrendered,
-          }),
-        });
-
-        const json = (await res.json()) as {
-          ok?: boolean;
-          error?: string;
-          alreadySubmitted?: boolean;
-          ratingDelta?: number;
-          playerRatingBefore?: number;
-          playerRatingAfter?: number;
-          weeklyResetApplied?: boolean;
-          characterAverageHands?: number;
-        };
-
-        if (cancelled) return;
-
-        if (!json?.ok) {
-          throw new Error(json?.error ?? "submit failed");
-        }
-
-        submitDoneRoundRef.current = roundId;
-
-        const before = json.playerRatingBefore ?? 0;
-        const after = json.playerRatingAfter ?? before;
-        const delta =
-          typeof json.ratingDelta === "number"
-            ? json.ratingDelta
-            : after - before;
-
-        setRatingStats({
-          before,
-          after,
-          delta,
-          alreadySubmitted: Boolean(json.alreadySubmitted),
-          weeklyResetApplied: Boolean(json.weeklyResetApplied),
-          characterAverageHands:
-            typeof json.characterAverageHands === "number"
-              ? json.characterAverageHands
-              : undefined,
-        });
-      } catch (e: unknown) {
-        if (!cancelled) {
-          setSubmitError(e instanceof Error ? e.message : String(e));
-          setRatingStats(null);
-        }
-      } finally {
-        if (!cancelled) setSubmitLoading(false);
-      }
-    };
-
-    void run();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    finished,
-    won,
-    guesses.length,
-    surrendered,
-    playerName,
-    roundId,
-    target.name,
-    submitRetryKey,
-  ]);
-
-  const goNextRound = useCallback(() => {
-    submitDoneRoundRef.current = null;
-    setTarget(pickRandomTarget(list));
-    setRoundId(
-      typeof crypto !== "undefined" ? crypto.randomUUID() : String(Date.now())
-    );
-    setGuesses([]);
-    setSurrendered(false);
-    setMessage(null);
-    setQuery("");
-    setRatingStats(null);
-    setSubmitError(null);
-    setSubmitLoading(false);
-    setDebugRevealAnswer(false);
-  }, [list]);
-
-  const saveNameFromModal = useCallback(() => {
-    setNameFieldTouched(true);
-    const v = validateDisplayName(nameDraft, {
-      ignoreBadSubstrings: isAdminUid(viewerUid),
-    });
-    if (!v.ok) return;
-    setPlayerName(v.name);
-    setNameModalOpen(false);
-  }, [nameDraft, viewerUid]);
-
-  const nameHintModal =
-    nameFieldTouched && !draftPreview.ok ? draftPreview.error : null;
-
-  const showSuggest =
-    query.trim().length > 0 && suggestions.length > 0 && !finished;
+    window.location.href = `/room/${code}`;
+  };
 
   return (
-    <div className="flex min-h-screen flex-1 flex-col bg-[#0a0f1e] text-white">
-      <header className="relative z-10 w-full shrink-0 border-b border-[#ece5d8]/10 bg-[#0a0f1e]/92 px-3 py-2 backdrop-blur-sm sm:px-6">
-        <nav
-          className="mx-auto flex w-full max-w-4xl flex-wrap items-center gap-x-2 gap-y-2 sm:gap-x-3"
-          aria-label="メインナビゲーション"
-        >
-          <button
-            type="button"
-            onClick={() => {
-              setNameFieldTouched(false);
-              setNameModalOpen(true);
-            }}
-            className="shrink-0 rounded-full border border-[#ece5d8]/25 bg-[#12182a]/95 px-2.5 py-1.5 text-xs font-medium text-[#ece5d8] shadow-sm backdrop-blur-sm transition hover:border-[#ece5d8]/45 sm:px-3 sm:py-2 sm:text-sm"
-          >
-            名前変更
-          </button>
-        </nav>
+    <div className="mx-auto flex min-h-screen max-w-lg flex-col gap-8 px-4 py-8 text-white">
+      <GameRulesModal open={rulesOpen} onClose={() => setRulesOpen(false)} />
+      <PlayerNameModal
+        open={nameModalOpen}
+        onClose={() => setNameModalOpen(false)}
+        initialName={displayName}
+        onSaved={(name) => {
+          setDisplayName(name);
+          try {
+            localStorage.setItem(PLAYER_NAME_KEY, name);
+          } catch {
+            /* ignore */
+          }
+        }}
+      />
+
+      <header>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium uppercase tracking-[0.2em] text-[#ece5d8]/55">
+              Multi
+            </p>
+            <h1 className="mt-1 text-2xl font-semibold text-[#ece5d8]">
+              ルームで対戦
+            </h1>
+            <p className="mt-2 text-sm leading-relaxed text-white/65">
+              5桁の部屋番号で集まり、リアルタイムで対戦しよう。
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-col gap-1.5 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={() => setRulesOpen(true)}
+              className="rounded-lg border border-[#ece5d8]/25 bg-[#0a0f1e]/90 px-2.5 py-1.5 text-xs font-medium text-[#ece5d8]/90 transition hover:border-[#ece5d8]/45"
+            >
+              ルール
+            </button>
+            <button
+              type="button"
+              onClick={() => setNameModalOpen(true)}
+              className="rounded-lg border border-amber-500/35 bg-amber-950/30 px-2.5 py-1.5 text-xs font-medium text-amber-100/95 transition hover:border-amber-400/50"
+            >
+              名前変更
+            </button>
+          </div>
+        </div>
+        <p className="mt-4 text-sm text-amber-200/90">
+          参加者が2人以上そろったら、ホストが「ゲーム開始」でプレイ画面に移ります。
+        </p>
       </header>
 
-      <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-4 pb-16 pt-4 text-white sm:gap-7 sm:pt-5">
-        <header className="text-center">
-          <p
-            className={`text-xs font-medium uppercase tracking-[0.28em] text-[#ece5d8]/60`}
-          >
-            GenshinGuesser
-          </p>
-          <h1
-            className={`mt-1.5 text-3xl font-semibold tracking-tight sm:text-4xl ${ACCENT}`}
-          >
-            GenshinGuesser
-          </h1>
-
-          <div className="mx-auto mt-3 max-w-lg text-left sm:mt-4">
-            <p className="text-center text-sm font-semibold tracking-wide text-[#ece5d8]">
-              【遊び方ガイド】
-            </p>
-            <ul className="mt-2 space-y-2 text-sm leading-relaxed text-white/72">
-              <li className="flex gap-2">
-                <span className="shrink-0 select-none text-[#ece5d8]/55" aria-hidden>
-                  ・
-                </span>
-                <span>
-                  全{MAX_GUESSES}手以内に正解を導き出せ！
-                </span>
-              </li>
-              <li className="flex gap-2">
-                <span className="shrink-0 select-none text-[#ece5d8]/55" aria-hidden>
-                  ・
-                </span>
-                <span>
-                  要素が一致すると
-                  <span className="font-bold text-emerald-300">【黄緑色】</span>
-                  に発光します。
-                </span>
-              </li>
-              <li className="flex gap-2">
-                <span className="shrink-0 select-none text-[#ece5d8]/55" aria-hidden>
-                  ・
-                </span>
-                <span>
-                  各行の「予想Ver」は
-                  <span className="font-semibold text-[#ece5d8]">その予想キャラ</span>
-                  の実装バージョンです。正解より古い／新しい場合は
-                  <span className="font-bold text-sky-300">【↑ / ↓】</span>
-                  が付きます。
-                </span>
-              </li>
-              <li className="flex gap-2">
-                <span className="shrink-0 select-none text-[#ece5d8]/55" aria-hidden>
-                  ・
-                </span>
-                <span>
-                  画面上部の
-                  <span className="font-semibold text-[#ece5d8]">「名前変更」</span>
-                  から名前を登録すると、チャットなどに表示されます。
-                </span>
-              </li>
-            </ul>
-
-            <div className="mt-4">
-              <a
-                href="https://realtime-seven.vercel.app/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-3 block w-full rounded-xl border border-amber-500/30 bg-[#0d1324]/85 px-3 py-2.5 text-center text-sm font-semibold text-amber-200/95 transition hover:border-amber-500/50 sm:px-4 sm:py-3"
-              >
-                リアルタイム対戦
-              </a>
-            </div>
-
-            <p className="mt-3 text-center text-[0.8125rem] font-medium leading-snug text-amber-300/95 sm:text-sm">
-              ※クイズは既に始まっています。最初の1手を入力してください！
-            </p>
-          </div>
-        </header>
-
-        <section className="relative z-30 overflow-visible rounded-2xl border border-[#ece5d8]/20 bg-[#0d1324]/90 p-4 shadow-[0_20px_50px_-20px_rgba(0,0,0,0.6)] backdrop-blur-sm sm:p-5">
-          <div className="flex flex-col gap-3">
-            <div className="relative">
-              <label
-                htmlFor="guess"
-                className="mb-1 block text-xs font-medium text-[#ece5d8]/80"
-              >
-                キャラ名で検索
-              </label>
-              <div className="relative">
-                <input
-                  id="guess"
-                  value={query}
-                  disabled={finished}
-                  onChange={(e) => setQuery(e.target.value)}
-                  autoComplete="off"
-                  placeholder="例: フリーナ"
-                  className="w-full rounded-xl border border-[#ece5d8]/20 bg-[#12182a]/90 py-3 pl-4 pr-12 text-sm text-white outline-none ring-0 transition placeholder:text-white/35 focus:border-[#ece5d8]/45 focus:ring-2 focus:ring-[#ece5d8]/15 disabled:cursor-not-allowed disabled:opacity-50"
-                />
-                {query.length > 0 && !finished && (
-                  <button
-                    type="button"
-                    aria-label="検索をクリア"
-                    onClick={() => setQuery("")}
-                    className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-lg leading-none text-[#ece5d8]/70 transition hover:bg-white/10 hover:text-white"
-                  >
-                    ×
-                  </button>
-                )}
-                {showSuggest && (
-                  <ul
-                    className="absolute left-0 right-0 top-full z-[100] mt-1 max-h-56 overflow-auto rounded-xl border border-[#ece5d8]/20 bg-[#12182a] py-1 shadow-2xl shadow-black/50"
-                    role="listbox"
-                  >
-                    {suggestions.map((c) => (
-                      <li key={c.name} role="option">
-                        <button
-                          type="button"
-                          onClick={() => submitGuess(c)}
-                          className="flex w-full items-center px-4 py-2.5 text-left text-sm text-white transition hover:bg-white/10"
-                        >
-                          <span className="font-medium">{c.name}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
-          </div>
-          {message && (
-            <p className="mt-2 text-sm text-amber-300/95">{message}</p>
-          )}
-
-          {showAdminTools && (
-            <div className="mt-2 rounded-lg border border-rose-500/35 bg-rose-950/30 px-3 py-2">
-              <button
-                type="button"
-                onClick={() => setDebugRevealAnswer((v) => !v)}
-                aria-pressed={debugRevealAnswer}
-                className="text-left text-xs font-medium text-rose-100/95 underline decoration-rose-400/50 underline-offset-2 hover:text-rose-50"
-              >
-                {debugRevealAnswer ? "正解を隠す" : "正解を表示（デバッグ）"}
-              </button>
-              {debugRevealAnswer && (
-                <p className="mt-1.5 font-mono text-sm font-semibold text-rose-50">
-                  正解: {target.name}
-                </p>
-              )}
-            </div>
-          )}
-
-          {!finished && (
-            <div className="mt-3 flex w-full flex-col gap-2">
-              {!canResign && (
-                <p className="max-w-full text-right text-xs text-white/50 sm:text-left">
-                  4回予想してから諦められます
-                </p>
-              )}
-              <div className="flex w-full min-w-0 items-center justify-between gap-2 sm:gap-3">
-                <button
-                  type="button"
-                  onClick={() => setChatOpen(true)}
-                  className="shrink-0 rounded-xl border border-sky-400/35 bg-[#12182a]/80 px-3 py-2 text-sm font-medium text-sky-100/95 transition hover:border-sky-400/55 hover:bg-[#1a2238] sm:px-4"
-                  aria-haspopup="dialog"
-                >
-                  チャット
-                </button>
-                <button
-                  type="button"
-                  onClick={resign}
-                  disabled={!canResign}
-                  className="shrink-0 rounded-xl border border-[#ece5d8]/25 bg-[#12182a]/80 px-3 py-2 text-sm font-medium text-[#ece5d8] transition hover:bg-[#1a2238] disabled:cursor-not-allowed disabled:opacity-45 sm:px-4"
-                >
-                  諦める
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section className="relative z-0 space-y-4">
-          {guesses.length === 0 && (
-            <p className="text-center text-sm text-white/55">
-              まだ予想がありません。上の欄からキャラを選んでください。
-            </p>
-          )}
-          {guesses.map((g, idx) => (
-            <div
-              key={`${g.name}-${idx}`}
-              className="rounded-2xl border border-[#ece5d8]/15 bg-[#0d1324]/80 p-3 shadow-lg shadow-black/30 sm:p-4"
-            >
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5 sm:gap-3">
-                <Tile
-                  label="キャラ名"
-                  value={g.name}
-                  ok={g.name === target.name}
-                  className={matchClass(g.name === target.name)}
-                />
-                <Tile
-                  label="元素"
-                  value={g.element}
-                  ok={g.element === target.element}
-                  className={matchClass(g.element === target.element)}
-                />
-                <Tile
-                  label="武器"
-                  value={g.weapon}
-                  ok={g.weapon === target.weapon}
-                  className={matchClass(g.weapon === target.weapon)}
-                />
-                <Tile
-                  label="地域"
-                  value={g.region}
-                  ok={g.region === target.region}
-                  className={matchClass(g.region === target.region)}
-                />
-                <Tile
-                  label="予想Ver"
-                  value={(() => {
-                    const gv = getVer(g);
-                    const tv = getVer(target);
-                    if (gv === null || tv === null) return "—";
-                    if (gv === tv) return String(gv);
-                    return `${gv} ${gv < tv ? "↑" : "↓"}`;
-                  })()}
-                  ok={(() => {
-                    const gv = getVer(g);
-                    const tv = getVer(target);
-                    return gv !== null && tv !== null && gv === tv;
-                  })()}
-                  className={matchClass(
-                    (() => {
-                      const gv = getVer(g);
-                      const tv = getVer(target);
-                      return gv !== null && tv !== null && gv === tv;
-                    })()
-                  )}
-                />
-              </div>
-            </div>
-          ))}
-        </section>
-      </div>
-
-      {chatOpen && (
-        <ChatRoomPanel
-          playerName={playerName}
-          onClose={() => setChatOpen(false)}
-        />
-      )}
-
-      {nameModalOpen && (
-        <div
-          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="name-modal-title"
-        >
-          <div className="w-full max-w-md rounded-2xl border border-[#ece5d8]/25 bg-[#12182a] p-6 shadow-2xl">
-            <h2
-              id="name-modal-title"
-              className="text-lg font-semibold text-[#ece5d8]"
-            >
-              プレイヤー名の変更
-            </h2>
-            <p className="mt-1 text-sm text-white/55">
-              2〜12文字。チャットなどに表示されます。
-            </p>
+      <section className="rounded-2xl border border-[#ece5d8]/20 bg-[#0d1324]/90 p-4">
+        <h2 className="text-sm font-semibold text-[#ece5d8]">部屋番号で入室</h2>
+        <p className="mt-2 text-xs text-white/50">
+          入室前に右上の「名前変更」で表示名（2〜12文字）を設定してください。
+        </p>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+          <label className="flex-1 text-xs text-white/55">
+            5桁コード
             <input
-              value={nameDraft}
-              onChange={(e) => setNameDraft(e.target.value)}
-              onBlur={() => setNameFieldTouched(true)}
-              maxLength={24}
-              className="mt-4 w-full rounded-xl border border-[#ece5d8]/20 bg-[#0a0f1e] px-4 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#ece5d8]/45 focus:ring-2 focus:ring-[#ece5d8]/15"
-              placeholder="例: 旅人"
+              value={joinInput}
+              onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
+              maxLength={8}
+              placeholder="例: XJ79L"
+              className="mt-1 w-full rounded-xl border border-[#ece5d8]/20 bg-[#0a0f1e] px-3 py-2 font-mono text-sm text-white outline-none"
             />
-            {nameHintModal && (
-              <p className="mt-2 text-xs text-rose-400">{nameHintModal}</p>
-            )}
-            <div className="mt-6 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setNameModalOpen(false)}
-                className="rounded-xl px-4 py-2 text-sm text-white/70 transition hover:bg-white/10"
-              >
-                キャンセル
-              </button>
-              <button
-                type="button"
-                onClick={saveNameFromModal}
-                className="rounded-xl border border-[#ece5d8]/35 bg-[#ece5d8]/10 px-4 py-2 text-sm font-medium text-[#ece5d8] transition hover:bg-[#ece5d8]/20"
-              >
-                保存
-              </button>
-            </div>
-          </div>
+          </label>
+          <label className="flex-1 text-xs text-white/55">
+            パスワード（任意）
+            <input
+              type="password"
+              value={joinPwd}
+              onChange={(e) => setJoinPwd(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-[#ece5d8]/20 bg-[#0a0f1e] px-3 py-2 text-sm text-white outline-none"
+            />
+          </label>
         </div>
-      )}
-
-      {finished && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="result-title"
+        <button
+          type="button"
+          disabled={!nameCheck.ok}
+          onClick={goJoinByCode}
+          className="mt-3 w-full rounded-xl border border-emerald-500/40 bg-emerald-950/40 py-2.5 text-sm font-medium text-emerald-100 disabled:cursor-not-allowed disabled:opacity-45"
         >
-          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-[#ece5d8]/25 bg-[#12182a] p-6 shadow-2xl shadow-black/50">
-            <h2
-              id="result-title"
-              className="text-center text-lg font-semibold text-[#ece5d8]"
-            >
-              {won ? "正解" : "不正解"}
-            </h2>
-            <p className="mt-1 text-center text-sm text-white/50">答え</p>
-            <p className="mt-2 text-center text-3xl font-bold tracking-tight text-white">
-              {target.name}
-            </p>
+          入室
+        </button>
+        {joinErr && (
+          <p className="mt-2 text-xs text-rose-400">{joinErr}</p>
+        )}
+      </section>
 
-            {ratingStats != null &&
-              typeof ratingStats.characterAverageHands === "number" && (
-                <p className="mt-3 text-center text-sm leading-relaxed text-sky-200/90">
-                  このキャラの平均手数（全プレイヤー・勝敗含む・単純平均）:{" "}
-                  <span className="font-semibold tabular-nums text-white">
-                    {ratingStats.characterAverageHands.toFixed(2)}
-                  </span>{" "}
-                  手
-                </p>
-              )}
+      <section className="rounded-2xl border border-[#ece5d8]/20 bg-[#0d1324]/90 p-4">
+        <h2 className="text-sm font-semibold text-[#ece5d8]">ルームを作成</h2>
+        <label className="mt-3 block text-xs text-white/55">
+          ルーム名
+          <input
+            value={roomName}
+            onChange={(e) => setRoomName(e.target.value)}
+            className="mt-1 w-full rounded-xl border border-[#ece5d8]/20 bg-[#0a0f1e] px-3 py-2 text-sm text-white outline-none"
+          />
+        </label>
+        <label className="mt-3 flex items-center gap-2 text-sm text-white/80">
+          <input
+            type="checkbox"
+            checked={isPublic}
+            onChange={(e) => setIsPublic(e.target.checked)}
+          />
+          公開一覧に載せる
+        </label>
+        <label className="mt-3 block text-xs text-white/55">
+          合言葉（空ならなし）
+          <input
+            value={joinPassword}
+            onChange={(e) => setJoinPassword(e.target.value)}
+            className="mt-1 w-full rounded-xl border border-[#ece5d8]/20 bg-[#0a0f1e] px-3 py-2 text-sm text-white outline-none"
+          />
+        </label>
+        <label className="mt-3 block text-xs text-white/55">
+          最大人数（2〜8）
+          <input
+            type="number"
+            min={2}
+            max={8}
+            value={maxPlayers}
+            onChange={(e) => setMaxPlayers(Number(e.target.value))}
+            className="mt-1 w-full rounded-xl border border-[#ece5d8]/20 bg-[#0a0f1e] px-3 py-2 text-sm text-white outline-none"
+          />
+        </label>
+        <label className="mt-3 block text-xs text-white/55">
+          手数
+          <select
+            value={handMode}
+            onChange={(e) => setHandMode(e.target.value as HandMode)}
+            className="mt-1 w-full rounded-xl border border-[#ece5d8]/20 bg-[#0a0f1e] px-3 py-2 text-sm text-white outline-none"
+          >
+            <option value="seven">7手まで</option>
+            <option value="unlimited">無制限（∞）</option>
+          </select>
+        </label>
+        <p className="mt-2 text-[0.7rem] text-white/45">
+          1手あたり30秒の個人タイマー（端末ローカル）。タイムアウトはミス1回分としてサーバーにのみ送信します。
+        </p>
+        <button
+          type="button"
+          disabled={creating || !nameCheck.ok}
+          onClick={() => void onCreate()}
+          className="mt-4 w-full rounded-xl border border-amber-500/40 bg-amber-950/35 py-2.5 text-sm font-medium text-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {creating ? "作成中…" : "部屋を作成して入室"}
+        </button>
+        {createError && (
+          <p className="mt-2 text-xs text-rose-400">{createError}</p>
+        )}
+      </section>
 
-            {won && (
-              <p className="mt-6 text-center text-sm text-white/65">
-                {guesses.length} 回でクリアしました。
-              </p>
-            )}
-
-            <div className="mt-6 space-y-4">
-              {submitLoading && (
-                <p className="text-center text-base font-medium text-[#ece5d8]">
-                  レートを送信中…
-                </p>
-              )}
-
-              {!submitLoading && submitError && (
-                <div className="space-y-2">
-                  <p className="text-center text-sm text-rose-400">
-                    {submitError}
-                  </p>
-                  <div className="flex justify-center">
-                    <button
-                      type="button"
-                      onClick={() => setSubmitRetryKey((k) => k + 1)}
-                      className="text-sm font-medium text-[#ece5d8] underline decoration-[#ece5d8]/50 hover:text-white"
-                    >
-                      再送信
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {!submitLoading && ratingStats && (
-                <div
-                  className={`rounded-xl border px-4 py-4 text-center ${
-                    ratingStats.delta >= 0
-                      ? "border-emerald-500/30 bg-emerald-950/40"
-                      : "border-rose-500/30 bg-rose-950/35"
-                  }`}
-                >
-                  <p
-                    className={`text-xs font-medium uppercase tracking-wider ${
-                      ratingStats.delta >= 0
-                        ? "text-emerald-300/90"
-                        : "text-rose-300/90"
-                    }`}
-                  >
-                    レート変動
-                  </p>
-                  {ratingStats.weeklyResetApplied && (
-                    <p className="mt-2 text-xs text-amber-200/85">
-                      週が切り替わったため、レートを1500から再計算しました。
-                    </p>
-                  )}
-                  {ratingStats.alreadySubmitted ? (
-                    <p
-                      className={`mt-2 text-sm ${
-                        ratingStats.delta >= 0
-                          ? "text-emerald-200/90"
-                          : "text-rose-200/90"
-                      }`}
-                    >
-                      このラウンドはすでに記録済みです
-                    </p>
-                  ) : (
-                    <p
-                      className={`mt-2 text-2xl font-bold tabular-nums tracking-tight sm:text-3xl ${
-                        ratingStats.delta >= 0
-                          ? "text-emerald-100"
-                          : "text-rose-100"
-                      }`}
-                    >
-                      レート：{Math.round(ratingStats.before)} →{" "}
-                      {Math.round(ratingStats.after)}
-                      <span className="ml-2 text-xl sm:text-2xl">
-                        (
-                        {ratingStats.delta >= 0 ? "+" : ""}
-                        {Math.round(ratingStats.delta)})
-                      </span>
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {!won && surrendered && (
-              <p className="mt-4 text-center text-sm text-white/60">
-                諦めたので答えを公開します。
-              </p>
-            )}
-
-            {!won && !surrendered && (
-              <p className="mt-4 text-center text-sm text-white/60">
-                手数切れです。
-              </p>
-            )}
-
-            <div className="mt-8 flex justify-center">
+      <section className="rounded-2xl border border-[#ece5d8]/20 bg-[#0d1324]/90 p-4">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-[#ece5d8]">公開ルーム</h2>
+          <button
+            type="button"
+            onClick={() => void refreshList()}
+            className="text-xs text-sky-300/90 underline"
+          >
+            更新
+          </button>
+        </div>
+        {loadingList && (
+          <p className="mt-3 text-sm text-white/45">読み込み中…</p>
+        )}
+        {listError && (
+          <p className="mt-3 text-xs text-rose-400">{listError}</p>
+        )}
+        {!loadingList && lobbies.length === 0 && !listError && (
+          <p className="mt-3 text-sm text-white/45">
+            公開中のルームはありません。
+          </p>
+        )}
+        <ul className="mt-3 space-y-2">
+          {lobbies.map(({ code, data }) => (
+            <li key={code}>
               <button
                 type="button"
-                onClick={goNextRound}
-                className="rounded-full border border-[#ece5d8]/35 bg-gradient-to-r from-amber-900/40 to-amber-800/30 px-8 py-3 text-sm font-semibold text-[#ece5d8] shadow-lg shadow-black/30 transition hover:border-[#ece5d8]/55"
+                onClick={() => goPublicRoom(code)}
+                className="flex w-full items-center justify-between rounded-xl border border-[#ece5d8]/15 bg-[#0a0f1e]/80 px-3 py-2 text-left text-sm transition hover:border-[#ece5d8]/35"
               >
-                次の問題へ
+                <span className="font-medium text-[#ece5d8]">
+                  {data.roomName}
+                </span>
+                <span className="font-mono text-amber-200/90">{code}</span>
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Tile(props: {
-  label: string;
-  value: string;
-  ok: boolean;
-  className: string;
-}) {
-  return (
-    <div
-      className={`flex min-h-[4.25rem] flex-col justify-center rounded-xl border px-2 py-2 text-center sm:min-h-[5rem] ${props.className}`}
-    >
-      <span className="text-[0.65rem] font-medium uppercase tracking-wider text-current/70">
-        {props.label}
-      </span>
-      <span className="mt-1 text-sm font-semibold leading-tight sm:text-base">
-        {props.value}
-      </span>
+            </li>
+          ))}
+        </ul>
+      </section>
     </div>
   );
 }

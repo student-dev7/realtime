@@ -30,6 +30,27 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // マルチプレイ: 1 ドキュメント 1 ルーム（部屋番号 = ドキュメント ID）
+    // 古い部屋の削除は Admin SDK（/api/clean-old-rooms）のみ
+    match /rooms/{roomId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && roomId.size() == 5
+        && request.resource.data.hostUid == request.auth.uid
+        && request.resource.data.playerStates is map
+        && request.resource.data.playerStates.keys().hasOnly([request.auth.uid]);
+      allow update: if request.auth != null && (
+        resource.data.hostUid == request.auth.uid
+        || request.auth.uid in resource.data.playerStates
+        || (
+          resource.data.status == 'lobby'
+          && !(request.auth.uid in resource.data.playerStates)
+        )
+      );
+      allow delete: if request.auth != null
+        && resource.data.hostUid == request.auth.uid;
+    }
+
     // ロビーチャット（匿名 UID で送受信）
     // hasOnly だとフィールド追加のたびにルール更新が必要。hasAll なら必須キーだけ揃えばよく、任意フィールドを後から足しやすい
     match /chat_messages/{msgId} {
