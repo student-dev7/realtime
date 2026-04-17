@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import { HomeLobbyClient } from "./HomeLobbyClient";
 
+/** トップを静的キャッシュし過ぎない（デプロイ後すぐロビー UI が反映されるように） */
+export const dynamic = "force-dynamic";
+
 const HOME_TITLE = "ルームで対戦";
 const HOME_DESCRIPTION =
   "5桁の部屋番号で集まり、リアルタイムで対戦しよう。参加者が2人以上そろったら、ホストが「ゲーム開始」でプレイ画面に移ります。";
