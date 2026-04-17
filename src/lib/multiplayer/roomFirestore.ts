@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -200,6 +201,23 @@ export async function joinRoom(params: {
       updatedAt: serverTimestamp(),
     });
   });
+}
+
+/** ホストがルームドキュメントを削除（解散）。ルール: hostUid のみ delete 可 */
+export async function hostDeleteRoom(params: {
+  db: Firestore;
+  roomCode: string;
+  hostUid: string;
+}): Promise<void> {
+  const { db, roomCode, hostUid } = params;
+  const ref = roomRef(db, roomCode);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return;
+  const data = snap.data() as MultiplayerRoomDoc;
+  if (data.hostUid !== hostUid) {
+    throw new Error("ホストのみ部屋を解散できます");
+  }
+  await deleteDoc(ref);
 }
 
 export async function leaveLobby(params: {

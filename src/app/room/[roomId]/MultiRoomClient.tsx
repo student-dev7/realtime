@@ -17,6 +17,7 @@ import { normalizeForSearch, type GuessCharacter } from "@/lib/guessUtils";
 import {
   applyGuessResult,
   applyTimeoutPenalty,
+  hostDeleteRoom,
   hostPlayAgain,
   hostStartGame,
   joinRoom,
@@ -34,6 +35,8 @@ import { GameRulesModal } from "@/components/GameRulesModal";
 import { PlayerNameModal } from "@/components/PlayerNameModal";
 
 const PLAYER_NAME_KEY = "genshinguesser-player-name";
+
+const NAME_REQUIRED_NOTICE = "名前を設定してください";
 
 type Props = {
   roomCode: string;
@@ -54,6 +57,7 @@ export function MultiRoomClient(props: Props) {
   const [busy, setBusy] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [nameModalOpen, setNameModalOpen] = useState(false);
+  const [nameGatePending, setNameGatePending] = useState<null | "join">(null);
 
   const [query, setQuery] = useState("");
   const [guesses, setGuesses] = useState<GuessCharacter[]>([]);
@@ -122,6 +126,29 @@ export function MultiRoomClient(props: Props) {
   const me = myUid && room ? room.playerStates[myUid] : undefined;
   const isHost = myUid != null && room?.hostUid === myUid;
 
+  const onGoTop = useCallback(async () => {
+    if (!room || !myUid) {
+      router.push("/");
+      return;
+    }
+    if (!isHost) {
+      router.push("/");
+      return;
+    }
+    setActionError(null);
+    setBusy(true);
+    try {
+      await ensureAnonymousSession();
+      const db = getFirestore(getFirebaseAuth().app);
+      await hostDeleteRoom({ db, roomCode, hostUid: myUid });
+      router.push("/");
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [room, myUid, isHost, roomCode, router]);
+
   const targetChar = useMemo(() => {
     const name = room?.targetCharacterName;
     if (!name) return null;
@@ -130,41 +157,69 @@ export function MultiRoomClient(props: Props) {
 
   const myGuessCount = me?.guessCount ?? 0;
 
-  const joinNameCheck = validateDisplayName(playerName, {
-    ignoreBadSubstrings: myUid ? isAdminUid(myUid) : false,
-  });
-
-  const tryJoin = useCallback(async () => {
-    if (!myUid || !room || room.status !== "lobby") return;
-    setJoinError(null);
-    setBusy(true);
-    try {
-      const db = getFirestore(getFirebaseAuth().app);
-      const nameCheck = validateDisplayName(playerName, {
+  const tryJoin = useCallback(
+    async (nameFromModal?: string) => {
+      if (!myUid || !room || room.status !== "lobby") return;
+      const raw = nameFromModal ?? playerName;
+      const nameCheck = validateDisplayName(raw, {
         ignoreBadSubstrings: isAdminUid(myUid),
       });
       if (!nameCheck.ok) {
-        setJoinError(nameCheck.error);
+        setJoinError(null);
+        setNameGatePending("join");
+        setNameModalOpen(true);
         return;
       }
-      await joinRoom({
-        db,
-        roomCode,
-        uid: myUid,
-        displayName: nameCheck.name,
-        joinPassword: joinPwd,
-      });
+      setJoinError(null);
+      setBusy(true);
       try {
-        localStorage.setItem(PLAYER_NAME_KEY, nameCheck.name);
-      } catch {
-        /* ignore */
+        const db = getFirestore(getFirebaseAuth().app);
+        await joinRoom({
+          db,
+          roomCode,
+          uid: myUid,
+          displayName: nameCheck.name,
+          joinPassword: joinPwd,
+        });
+        setPlayerName(nameCheck.name);
+        try {
+          localStorage.setItem(PLAYER_NAME_KEY, nameCheck.name);
+        } catch {
+          /* ignore */
+        }
+      } catch (e) {
+        setJoinError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
       }
-    } catch (e) {
-      setJoinError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+    },
+    [myUid, room, roomCode, playerName, joinPwd]
+  );
+
+  const onNameModalClose = () => {
+    setNameModalOpen(false);
+    setNameGatePending(null);
+  };
+
+  const onPlayerNameSaved = (name: string) => {
+    const pending = nameGatePending;
+    setPlayerName(name);
+    try {
+      localStorage.setItem(PLAYER_NAME_KEY, name);
+    } catch {
+      /* ignore */
     }
-  }, [myUid, room, roomCode, playerName, joinPwd]);
+    setNameModalOpen(false);
+    setNameGatePending(null);
+    if (!myUid) return;
+    const v = validateDisplayName(name, {
+      ignoreBadSubstrings: isAdminUid(myUid),
+    });
+    if (!v.ok) return;
+    if (pending === "join") {
+      void tryJoin(name);
+    }
+  };
 
   const onTimeout = useCallback(async () => {
     if (!myUid || !room || room.status !== "playing") return;
@@ -345,16 +400,16 @@ export function MultiRoomClient(props: Props) {
       <GameRulesModal open={rulesOpen} onClose={() => setRulesOpen(false)} />
       <PlayerNameModal
         open={nameModalOpen}
-        onClose={() => setNameModalOpen(false)}
+        onClose={onNameModalClose}
         initialName={playerName}
-        onSaved={(name) => {
-          setPlayerName(name);
-          try {
-            localStorage.setItem(PLAYER_NAME_KEY, name);
-          } catch {
-            /* ignore */
-          }
-        }}
+        onSaved={onPlayerNameSaved}
+        notice={nameGatePending ? NAME_REQUIRED_NOTICE : undefined}
+        title={nameGatePending ? "表示名を設定" : undefined}
+        description={
+          nameGatePending
+            ? "2〜12文字。保存すると参加が続行されます。"
+            : undefined
+        }
       />
 
       <header className="flex flex-wrap items-start justify-between gap-2 border-b border-[#ece5d8]/15 pb-3">
@@ -374,17 +429,22 @@ export function MultiRoomClient(props: Props) {
           </button>
           <button
             type="button"
-            onClick={() => setNameModalOpen(true)}
+            onClick={() => {
+              setNameGatePending(null);
+              setNameModalOpen(true);
+            }}
             className="rounded-lg border border-amber-500/35 bg-amber-950/30 px-2.5 py-1.5 text-xs font-medium text-amber-100/95 transition hover:border-amber-400/50"
           >
             名前変更
           </button>
-          <Link
-            href="/"
-            className="text-xs text-sky-300/90 underline"
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onGoTop()}
+            className="text-xs text-sky-300/90 underline disabled:opacity-50"
           >
             トップ
-          </Link>
+          </button>
         </div>
       </header>
 
@@ -417,14 +477,9 @@ export function MultiRoomClient(props: Props) {
           {joinError && (
             <p className="text-xs text-rose-400">{joinError}</p>
           )}
-          {!joinNameCheck.ok && (
-            <p className="text-xs text-white/50">
-              表示名は2〜12文字で入力してください（右上「名前変更」でも設定できます）。
-            </p>
-          )}
           <button
             type="button"
-            disabled={busy || !joinNameCheck.ok}
+            disabled={busy}
             onClick={() => void tryJoin()}
             className="w-full rounded-xl border border-emerald-500/40 bg-emerald-950/40 py-2.5 text-sm font-medium text-emerald-100 disabled:cursor-not-allowed disabled:opacity-50"
           >

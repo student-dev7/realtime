@@ -9,10 +9,24 @@ type Props = {
   /** 保存済みの表示名（開いたときの初期値） */
   initialName: string;
   onSaved: (name: string) => void;
+  /** 見出し（未設定時の警告などで上書き） */
+  title?: string;
+  /** 説明文（未設定時の案内など） */
+  description?: string;
+  /** 強調メッセージ（名前未設定で入室等を押したとき） */
+  notice?: string;
 };
 
 export function PlayerNameModal(props: Props) {
-  const { open, onClose, initialName, onSaved } = props;
+  const {
+    open,
+    onClose,
+    initialName,
+    onSaved,
+    title = "表示名の変更",
+    description = "2〜12文字。ルームで表示されます。",
+    notice,
+  } = props;
   const [draft, setDraft] = useState(initialName);
   const [touched, setTouched] = useState(false);
 
@@ -52,13 +66,21 @@ export function PlayerNameModal(props: Props) {
       aria-labelledby="player-name-modal-title"
     >
       <div className="w-full max-w-md rounded-2xl border border-[#ece5d8]/25 bg-[#12182a] p-6 shadow-2xl">
+        {notice ? (
+          <p
+            className="rounded-xl border border-amber-500/35 bg-amber-950/40 px-3 py-2 text-sm font-medium text-amber-100/95"
+            role="alert"
+          >
+            {notice}
+          </p>
+        ) : null}
         <h2
           id="player-name-modal-title"
-          className="text-lg font-semibold text-[#ece5d8]"
+          className={`text-lg font-semibold text-[#ece5d8] ${notice ? "mt-4" : ""}`}
         >
-          表示名の変更
+          {title}
         </h2>
-        <p className="mt-1 text-sm text-white/55">2〜12文字。ルームで表示されます。</p>
+        <p className="mt-1 text-sm text-white/55">{description}</p>
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

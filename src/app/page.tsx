@@ -18,6 +18,14 @@ import { PlayerNameModal } from "@/components/PlayerNameModal";
 
 const PLAYER_NAME_KEY = "genshinguesser-player-name";
 
+const NAME_REQUIRED_NOTICE = "名前を設定してください";
+
+type NameGatePending =
+  | null
+  | "join"
+  | "create"
+  | { kind: "public"; code: string };
+
 export default function HomePage() {
   const [lobbies, setLobbies] = useState<
     { code: string; data: MultiplayerRoomDoc }[]
@@ -28,6 +36,9 @@ export default function HomePage() {
   const [displayName, setDisplayName] = useState("");
   const [rulesOpen, setRulesOpen] = useState(false);
   const [nameModalOpen, setNameModalOpen] = useState(false);
+  /** 名前未設定で入室／作成／公開から入室しようとしたとき、保存後に続行する */
+  const [nameGatePending, setNameGatePending] =
+    useState<NameGatePending>(null);
 
   const [roomName, setRoomName] = useState("みんなでゲッサー");
   const [isPublic, setIsPublic] = useState(true);
@@ -50,8 +61,6 @@ export default function HomePage() {
     }
   }, []);
 
-  const nameCheck = validateDisplayName(displayName);
-
   const refreshList = useCallback(async () => {
     setListError(null);
     setLoadingList(true);
@@ -71,11 +80,21 @@ export default function HomePage() {
     void refreshList();
   }, [refreshList]);
 
-  const onCreate = async () => {
+  const persistName = (name: string) => {
+    try {
+      localStorage.setItem(PLAYER_NAME_KEY, name);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const onCreate = async (nameFromModal?: string) => {
     setCreateError(null);
-    const v = validateDisplayName(displayName);
+    const raw = nameFromModal ?? displayName;
+    const v = validateDisplayName(raw);
     if (!v.ok) {
-      setCreateError(v.error);
+      setJoinErr(null);
+      setNameGatePending("create");
       setNameModalOpen(true);
       return;
     }
@@ -96,11 +115,7 @@ export default function HomePage() {
         maxPlayers,
         handMode,
       });
-      try {
-        localStorage.setItem(PLAYER_NAME_KEY, v.name);
-      } catch {
-        /* ignore */
-      }
+      persistName(v.name);
       window.location.href = `/room/${code}`;
     } catch (e) {
       setCreateError(e instanceof Error ? e.message : String(e));
@@ -109,10 +124,12 @@ export default function HomePage() {
     }
   };
 
-  const goJoinByCode = () => {
-    const v = validateDisplayName(displayName);
+  const goJoinByCode = (nameFromModal?: string) => {
+    const raw = nameFromModal ?? displayName;
+    const v = validateDisplayName(raw);
     if (!v.ok) {
-      setJoinErr(v.error);
+      setJoinErr(null);
+      setNameGatePending("join");
       setNameModalOpen(true);
       return;
     }
@@ -122,28 +139,49 @@ export default function HomePage() {
       return;
     }
     setJoinErr(null);
-    try {
-      localStorage.setItem(PLAYER_NAME_KEY, v.name);
-    } catch {
-      /* ignore */
-    }
+    persistName(v.name);
     const q = joinPwd.trim() ? `?pwd=${encodeURIComponent(joinPwd.trim())}` : "";
     window.location.href = `/room/${code}${q}`;
   };
 
-  const goPublicRoom = (code: string) => {
-    const v = validateDisplayName(displayName);
+  const goPublicRoom = (code: string, nameFromModal?: string) => {
+    const raw = nameFromModal ?? displayName;
+    const v = validateDisplayName(raw);
     if (!v.ok) {
-      setJoinErr(v.error);
+      setJoinErr(null);
+      setNameGatePending({ kind: "public", code });
       setNameModalOpen(true);
       return;
     }
-    try {
-      localStorage.setItem(PLAYER_NAME_KEY, v.name);
-    } catch {
-      /* ignore */
-    }
+    persistName(v.name);
     window.location.href = `/room/${code}`;
+  };
+
+  const onNameModalClose = () => {
+    setNameModalOpen(false);
+    setNameGatePending(null);
+  };
+
+  const onNameSaved = (name: string) => {
+    const pending = nameGatePending;
+    setDisplayName(name);
+    persistName(name);
+    setNameModalOpen(false);
+    setNameGatePending(null);
+    const v = validateDisplayName(name);
+    if (!v.ok) return;
+
+    if (pending === "join") {
+      goJoinByCode(name);
+      return;
+    }
+    if (pending === "create") {
+      void onCreate(name);
+      return;
+    }
+    if (pending?.kind === "public") {
+      goPublicRoom(pending.code, name);
+    }
   };
 
   return (
@@ -151,16 +189,16 @@ export default function HomePage() {
       <GameRulesModal open={rulesOpen} onClose={() => setRulesOpen(false)} />
       <PlayerNameModal
         open={nameModalOpen}
-        onClose={() => setNameModalOpen(false)}
+        onClose={onNameModalClose}
         initialName={displayName}
-        onSaved={(name) => {
-          setDisplayName(name);
-          try {
-            localStorage.setItem(PLAYER_NAME_KEY, name);
-          } catch {
-            /* ignore */
-          }
-        }}
+        onSaved={onNameSaved}
+        notice={nameGatePending ? NAME_REQUIRED_NOTICE : undefined}
+        title={nameGatePending ? "表示名を設定" : undefined}
+        description={
+          nameGatePending
+            ? "2〜12文字。保存すると入室・ルーム作成が続行されます。"
+            : undefined
+        }
       />
 
       <header>
@@ -186,7 +224,10 @@ export default function HomePage() {
             </button>
             <button
               type="button"
-              onClick={() => setNameModalOpen(true)}
+              onClick={() => {
+                setNameGatePending(null);
+                setNameModalOpen(true);
+              }}
               className="rounded-lg border border-amber-500/35 bg-amber-950/30 px-2.5 py-1.5 text-xs font-medium text-amber-100/95 transition hover:border-amber-400/50"
             >
               名前変更
@@ -226,9 +267,8 @@ export default function HomePage() {
         </div>
         <button
           type="button"
-          disabled={!nameCheck.ok}
-          onClick={goJoinByCode}
-          className="mt-3 w-full rounded-xl border border-emerald-500/40 bg-emerald-950/40 py-2.5 text-sm font-medium text-emerald-100 disabled:cursor-not-allowed disabled:opacity-45"
+          onClick={() => goJoinByCode()}
+          className="mt-3 w-full rounded-xl border border-emerald-500/40 bg-emerald-950/40 py-2.5 text-sm font-medium text-emerald-100"
         >
           入室
         </button>
@@ -290,7 +330,7 @@ export default function HomePage() {
         </p>
         <button
           type="button"
-          disabled={creating || !nameCheck.ok}
+          disabled={creating}
           onClick={() => void onCreate()}
           className="mt-4 w-full rounded-xl border border-amber-500/40 bg-amber-950/35 py-2.5 text-sm font-medium text-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
         >
