@@ -1,13 +1,10 @@
 /**
- * デバッグ UI（DBG パネル・正解表示など）を本番でも使える UID。
+ * デバッグ UI（DBG パネル・正解表示・チャットモデレーター等）を本番で有効にする UID。
  * カンマ区切りで追加: NEXT_PUBLIC_ADMIN_UIDS=uid1,uid2
- *
- * チャット全削除・他人メッセージ削除は Firestore の isChatModerator とも同期すること
- * （env のみ追加した場合は firestore.rules に手動で同じ UID を追記）。
+ * 他人のチャット削除を許可する場合は firestore.rules の delete 条件も合わせて更新すること。
  */
-const BUILTIN_ADMIN_UIDS = new Set<string>([
-  "WVvphz6TOZSKuwck6Kf83vAFupo2",
-]);
+/** 組み込み管理者 UID（空＝本番では誰も管理者にならない） */
+const BUILTIN_ADMIN_UIDS = new Set<string>([]);
 
 function adminUidsFromEnv(): Set<string> {
   const raw = process.env.NEXT_PUBLIC_ADMIN_UIDS ?? "";

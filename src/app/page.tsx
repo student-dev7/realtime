@@ -1,19 +1,13 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CHARACTERS from "../data/characters.json";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc, getFirestore } from "firebase/firestore";
 import { ChatRoomPanel } from "../components/ChatRoomPanel";
-import { GoldCoinIcon } from "../components/GoldCoinIcon";
-import { MyRankStatus } from "../components/MyRankStatus";
-import { DEFAULT_INITIAL_RATING } from "../lib/elo";
 import {
   ensureAnonymousSession,
   getFirebaseAuth,
 } from "../lib/firebaseClient";
-import { DEBUG_USER_UPDATED_EVENT } from "../lib/debugUserEvents";
 import { useAdminMode } from "@/components/AdminModeProvider";
 import { isAdminUid } from "../lib/adminUids";
 import { validateDisplayName } from "../lib/validateDisplayName";
@@ -24,8 +18,6 @@ const MAX_GUESSES = 7;
 /** これ未満では降参不可（API の MIN と一致） */
 const MIN_GUESSES_TO_RESIGN = 4;
 const PLAYER_NAME_KEY = "genshinguesser-player-name";
-/** 対戦（ゴーストあり） / 個人（ゴーストなし） */
-const BATTLE_MODE_KEY = "genshinguesser-battle-mode";
 const ACCENT = "text-[#ece5d8]";
 
 function normalizeForSearch(s: string) {
@@ -53,12 +45,6 @@ function matchClass(ok: boolean) {
     : "border-[#ece5d8]/20 bg-[#12182a]/95 text-[#ece5d8]/95";
 }
 
-type GhostInfo = {
-  ghostRunId: string;
-  displayName: string;
-  handCount: number;
-};
-
 type RatingStats = {
   before: number;
   after: number;
@@ -67,14 +53,6 @@ type RatingStats = {
   weeklyResetApplied?: boolean;
   /** 正解キャラの全プレイヤー記録に基づく平均手数（単純平均・サーバー算出） */
   characterAverageHands?: number;
-  /** このラウンドで獲得したゴールド（レート増分×10、重複送信時は 0） */
-  goldEarned?: number;
-  /** 反映後の累計ゴールド */
-  goldTotal?: number;
-  /** 累計レートでティアまたはランク帯が一段上がった（この送信で初めて記録したときのみ） */
-  lifetimeTierPromoted?: boolean;
-  /** 昇格後の表示ラベル（例: ウォリアー III） */
-  promotedToRankLabel?: string;
 };
 
 export default function Home() {
@@ -99,68 +77,10 @@ export default function Home() {
   const [submitLoading, setSubmitLoading] = useState(false);
   const [submitRetryKey, setSubmitRetryKey] = useState(0);
   const submitDoneRoundRef = useRef<string | null>(null);
-  /** null = 読み込み中 */
-  const [totalGold, setTotalGold] = useState<number | null>(null);
-  /** Firestore lifetime_total_rate（累計・ランク表示の基準） */
-  const [lifetimeTotalRate, setLifetimeTotalRate] = useState<number | null>(
-    null
-  );
-  const [userProfileLoading, setUserProfileLoading] = useState(true);
-  const [goldHintOpen, setGoldHintOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
-  const goldBarRef = useRef<HTMLDivElement | null>(null);
   const { showAdminTools } = useAdminMode();
   const [debugRevealAnswer, setDebugRevealAnswer] = useState(false);
-  const [ghost, setGhost] = useState<GhostInfo | null>(null);
-  const [ghostEcho, setGhostEcho] = useState<string | null>(null);
-  const ghostToastShownRef = useRef(false);
-  /** true = 対戦モード（ゴースト） / false = 個人モード */
-  const [battleModeVs, setBattleModeVs] = useState(true);
-  const [patchNotesOpen, setPatchNotesOpen] = useState(false);
-  /** パッチノート第2層: どの題名を開いているか */
-  const [patchSection, setPatchSection] = useState<
-    "battle" | "stats" | "rate" | null
-  >(null);
   const [viewerUid, setViewerUid] = useState<string | null>(null);
-
-  const syncUserProfile = useCallback(async () => {
-    try {
-      await ensureAnonymousSession();
-      const auth = getFirebaseAuth();
-      const uid = auth.currentUser?.uid;
-      if (!uid) {
-        setTotalGold(0);
-        setLifetimeTotalRate(null);
-        setUserProfileLoading(false);
-        return;
-      }
-      const db = getFirestore(auth.app);
-      const snap = await getDoc(doc(db, "users", uid));
-      if (!snap.exists()) {
-        setTotalGold(0);
-        setLifetimeTotalRate(DEFAULT_INITIAL_RATING);
-        setUserProfileLoading(false);
-        return;
-      }
-      const d = snap.data();
-      const g =
-        typeof d?.gold === "number" && Number.isFinite(d.gold) ? d.gold : 0;
-      const lifetime =
-        typeof d?.lifetime_total_rate === "number" &&
-        Number.isFinite(d.lifetime_total_rate)
-          ? d.lifetime_total_rate
-          : typeof d?.rating === "number" && Number.isFinite(d.rating)
-            ? d.rating
-            : DEFAULT_INITIAL_RATING;
-      setTotalGold(g);
-      setLifetimeTotalRate(lifetime);
-    } catch {
-      setTotalGold(0);
-      setLifetimeTotalRate(DEFAULT_INITIAL_RATING);
-    } finally {
-      setUserProfileLoading(false);
-    }
-  }, []);
 
   const draftPreview = useMemo(
     () =>
@@ -186,21 +106,6 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    void syncUserProfile();
-  }, [syncUserProfile]);
-
-  useEffect(() => {
-    if (ratingStats == null) return;
-    void syncUserProfile();
-  }, [ratingStats, syncUserProfile]);
-
-  useEffect(() => {
-    const onDebugUser = () => void syncUserProfile();
-    window.addEventListener(DEBUG_USER_UPDATED_EVENT, onDebugUser);
-    return () => window.removeEventListener(DEBUG_USER_UPDATED_EVENT, onDebugUser);
-  }, [syncUserProfile]);
-
-  useEffect(() => {
     try {
       const s = localStorage.getItem(PLAYER_NAME_KEY);
       if (s) setPlayerName(s);
@@ -208,69 +113,6 @@ export default function Home() {
       /* ignore */
     }
   }, []);
-
-  useEffect(() => {
-    try {
-      const v = localStorage.getItem(BATTLE_MODE_KEY);
-      if (v === "solo") setBattleModeVs(false);
-      else if (v === "vs") setBattleModeVs(true);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(BATTLE_MODE_KEY, battleModeVs ? "vs" : "solo");
-    } catch {
-      /* ignore */
-    }
-  }, [battleModeVs]);
-
-  useEffect(() => {
-    setGhost(null);
-    ghostToastShownRef.current = false;
-    if (!battleModeVs) {
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch(
-          `/api/get-ghost?characterName=${encodeURIComponent(target.name)}`
-        );
-        const json = (await res.json()) as {
-          ok?: boolean;
-          ghost?: GhostInfo | null;
-        };
-        if (cancelled) return;
-        if (json?.ok && json.ghost) {
-          setGhost(json.ghost);
-        } else {
-          setGhost(null);
-        }
-      } catch {
-        if (!cancelled) setGhost(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [target.name, roundId, battleModeVs]);
-
-  useEffect(() => {
-    if (!ghost) return;
-    if (guesses.length !== ghost.handCount) return;
-    if (ghostToastShownRef.current) return;
-    ghostToastShownRef.current = true;
-    setGhostEcho(`${ghost.displayName}さんが正解しました！`);
-  }, [ghost, guesses.length]);
-
-  useEffect(() => {
-    if (!ghostEcho) return;
-    const t = window.setTimeout(() => setGhostEcho(null), 4500);
-    return () => window.clearTimeout(t);
-  }, [ghostEcho]);
 
   useEffect(() => {
     try {
@@ -290,29 +132,9 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKey);
   }, [nameModalOpen, playerName]);
 
-  useEffect(() => {
-    if (!goldHintOpen) return;
-    const onDown = (e: MouseEvent) => {
-      const el = goldBarRef.current;
-      if (el && !el.contains(e.target as Node)) {
-        setGoldHintOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [goldHintOpen]);
-
   const won = guesses.some((g) => g.name === target.name);
-  const lostToGhost =
-    battleModeVs &&
-    ghost !== null &&
-    !won &&
-    guesses.length > ghost.handCount;
   const finished =
-    surrendered ||
-    won ||
-    guesses.length >= MAX_GUESSES ||
-    lostToGhost;
+    surrendered || won || guesses.length >= MAX_GUESSES;
 
   const suggestions = useMemo(() => {
     const qRaw = query.trim();
@@ -407,9 +229,6 @@ export default function Home() {
             won,
             displayName: nameCheck.name,
             surrendered,
-            ...(!battleModeVs ? { personalMode: true } : {}),
-            ...(battleModeVs && ghost ? { ghostRunId: ghost.ghostRunId } : {}),
-            ...(battleModeVs && lostToGhost ? { lostToGhost: true } : {}),
           }),
         });
 
@@ -422,10 +241,6 @@ export default function Home() {
           playerRatingAfter?: number;
           weeklyResetApplied?: boolean;
           characterAverageHands?: number;
-          goldEarned?: number;
-          goldTotal?: number;
-          lifetimeTierPromoted?: boolean;
-          promotedToRankLabel?: string;
         };
 
         if (cancelled) return;
@@ -435,10 +250,6 @@ export default function Home() {
         }
 
         submitDoneRoundRef.current = roundId;
-
-        if (typeof json.goldTotal === "number" && Number.isFinite(json.goldTotal)) {
-          setTotalGold(json.goldTotal);
-        }
 
         const before = json.playerRatingBefore ?? 0;
         const after = json.playerRatingAfter ?? before;
@@ -456,15 +267,6 @@ export default function Home() {
           characterAverageHands:
             typeof json.characterAverageHands === "number"
               ? json.characterAverageHands
-              : undefined,
-          goldEarned:
-            typeof json.goldEarned === "number" ? json.goldEarned : undefined,
-          goldTotal:
-            typeof json.goldTotal === "number" ? json.goldTotal : undefined,
-          lifetimeTierPromoted: Boolean(json.lifetimeTierPromoted),
-          promotedToRankLabel:
-            typeof json.promotedToRankLabel === "string"
-              ? json.promotedToRankLabel
               : undefined,
         });
       } catch (e: unknown) {
@@ -490,9 +292,6 @@ export default function Home() {
     roundId,
     target.name,
     submitRetryKey,
-    ghost,
-    lostToGhost,
-    battleModeVs,
   ]);
 
   const goNextRound = useCallback(() => {
@@ -509,8 +308,6 @@ export default function Home() {
     setSubmitError(null);
     setSubmitLoading(false);
     setDebugRevealAnswer(false);
-    setGhostEcho(null);
-    ghostToastShownRef.current = false;
   }, [list]);
 
   const saveNameFromModal = useCallback(() => {
@@ -531,61 +328,11 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-1 flex-col bg-[#0a0f1e] text-white">
-      {ghostEcho && (
-        <div
-          className="fixed left-1/2 top-[4.25rem] z-[95] max-w-[min(22rem,calc(100vw-2rem))] -translate-x-1/2 rounded-xl border border-emerald-500/40 bg-emerald-950/90 px-4 py-2.5 text-center text-sm font-medium text-emerald-100 shadow-lg shadow-black/40"
-          role="status"
-        >
-          {ghostEcho}
-        </div>
-      )}
       <header className="relative z-10 w-full shrink-0 border-b border-[#ece5d8]/10 bg-[#0a0f1e]/92 px-3 py-2 backdrop-blur-sm sm:px-6">
         <nav
           className="mx-auto flex w-full max-w-4xl flex-wrap items-center gap-x-2 gap-y-2 sm:gap-x-3"
           aria-label="メインナビゲーション"
         >
-          <div ref={goldBarRef} className="relative flex shrink-0">
-            <button
-              type="button"
-              onClick={() => setGoldHintOpen((o) => !o)}
-              className="flex items-center gap-1.5 rounded-full border border-amber-400/35 bg-[#12182a]/95 px-2.5 py-1.5 text-xs font-medium tabular-nums text-amber-100/95 shadow-sm backdrop-blur-sm transition hover:border-amber-400/55 sm:px-3 sm:py-2 sm:text-sm"
-              aria-expanded={goldHintOpen}
-              aria-label="ゴールド（説明を表示）"
-            >
-              <GoldCoinIcon title="ゴールド" />
-              {totalGold === null
-                ? "…"
-                : Math.round(totalGold).toLocaleString("ja-JP")}
-            </button>
-            {goldHintOpen && (
-              <div
-                className="absolute left-0 top-full z-20 mt-1 max-w-[min(20rem,calc(100vw-2rem))] rounded-xl border border-amber-400/35 bg-[#12182a]/98 px-3 py-2.5 text-left text-xs leading-relaxed text-amber-100/95 shadow-xl shadow-black/40"
-                role="tooltip"
-              >
-                ゴールドはショップでアイコンを囲むフレームやアイコンの購入などに使えます（準備中）。
-              </div>
-            )}
-          </div>
-
-          <Link
-            href="/shop"
-            className="inline-flex shrink-0 items-center justify-center rounded-full border border-amber-500/35 bg-[#12182a]/95 px-2.5 py-1.5 text-xs font-medium text-amber-100/90 shadow-sm backdrop-blur-sm transition hover:border-amber-400/55 sm:px-3 sm:py-2 sm:text-sm"
-          >
-            ショップ
-          </Link>
-
-          <MyRankStatus
-            lifetimeTotalRate={lifetimeTotalRate}
-            loading={userProfileLoading}
-          />
-
-          <Link
-            href="/ranking"
-            className="inline-flex shrink-0 items-center justify-center rounded-full border border-[#ece5d8]/25 bg-[#12182a]/95 px-2.5 py-1.5 text-xs font-medium text-[#ece5d8] shadow-sm backdrop-blur-sm transition hover:border-[#ece5d8]/45 sm:px-3 sm:py-2 sm:text-sm"
-          >
-            ランキング
-          </Link>
-
           <button
             type="button"
             onClick={() => {
@@ -654,210 +401,20 @@ export default function Home() {
                 <span>
                   画面上部の
                   <span className="font-semibold text-[#ece5d8]">「名前変更」</span>
-                  から名前を登録して、
-                  <span className="font-bold text-amber-200/95">世界ランキング</span>
-                  に挑もう！
+                  から名前を登録すると、チャットなどに表示されます。
                 </span>
               </li>
             </ul>
 
             <div className="mt-4">
-              <button
-                type="button"
-                onClick={() => {
-                  setPatchNotesOpen((o) => {
-                    const next = !o;
-                    if (!next) setPatchSection(null);
-                    return next;
-                  });
-                }}
-                className="w-full rounded-xl border border-amber-500/30 bg-[#0d1324]/85 px-3 py-2.5 text-center text-sm font-semibold text-amber-200/95 transition hover:border-amber-500/50 sm:px-4 sm:py-3"
-                aria-expanded={patchNotesOpen}
+              <a
+                href="https://realtime-seven.vercel.app/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-3 block w-full rounded-xl border border-amber-500/30 bg-[#0d1324]/85 px-3 py-2.5 text-center text-sm font-semibold text-amber-200/95 transition hover:border-amber-500/50 sm:px-4 sm:py-3"
               >
-                パッチノート
-              </button>
-              {patchNotesOpen && (
-                <div className="mt-3 space-y-2 rounded-xl border border-amber-500/20 bg-[#0d1324]/85 px-2 py-2 text-sm sm:px-3">
-                  <div className="border-b border-[#ece5d8]/10 pb-2 last:border-b-0 last:pb-0">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPatchSection((s) => (s === "battle" ? null : "battle"))
-                      }
-                      className="w-full rounded-lg px-2 py-2 text-left text-sm font-semibold text-amber-200/95 transition hover:bg-white/[0.06]"
-                      aria-expanded={patchSection === "battle"}
-                    >
-                      対戦方式の変更について
-                    </button>
-                    {patchSection === "battle" && (
-                      <div className="space-y-2.5 border-t border-[#ece5d8]/10 px-2 pb-2 pt-3 leading-relaxed text-white/72">
-                        <p>
-                          対戦の基準を、
-                          <span className="font-semibold text-[#ece5d8]">
-                            過去のクリア記録から選ばれるゴースト
-                          </span>
-                          との比較に切り替えました（従来の「平均手数ボーナス」に加え、ゴーストとの差もレートに反映されます）。
-                        </p>
-                        <ul className="list-disc space-y-1.5 pl-4 marker:text-amber-400/80">
-                          <li>
-                            各ラウンドで対戦モードのとき、そのお題キャラの過去正解から1件がゴーストとして選ばれます（表示名・手数）。1〜2
-                            手だけの正解記録はゴーストに使いません。
-                          </li>
-                          <li>
-                            ゴーストが正解したのと同じ手数に達したタイミングで、ゴースト側の正解が通知されます。
-                          </li>
-                          <li>
-                            まだ自分が正解していない状態で、ゴーストの正解手数を
-                            <span className="font-medium text-[#ece5d8]">超えた</span>
-                            時点で
-                            <span className="font-medium text-rose-300/90">敗北</span>
-                            です。同じ手数の時点ではまだ続行できます。
-                          </li>
-                          <li>
-                            正解すればクリアで週次レートは勝ち更新です。未正解のままゴーストの手数を超えたときだけ敗北し、それまでは予想を続けられます。ゴーストより少ない手数で当てるほどボーナスが増えます。
-                          </li>
-                          <li>
-                            <span className="font-medium text-[#ece5d8]">個人モード</span>
-                            ではゴーストは出ず、
-                            <span className="font-medium text-amber-200/90">
-                              週次・累計レート・ゴールドは一切変動しません
-                            </span>
-                            （練習向け）。
-                          </li>
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="border-b border-[#ece5d8]/10 pb-2 last:border-b-0 last:pb-0">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPatchSection((s) => (s === "stats" ? null : "stats"))
-                      }
-                      className="w-full rounded-lg px-2 py-2 text-left text-sm font-semibold text-amber-200/95 transition hover:bg-white/[0.06]"
-                      aria-expanded={patchSection === "stats"}
-                    >
-                      キャラ統計・累計レートについて
-                    </button>
-                    {patchSection === "stats" && (
-                      <div className="space-y-2.5 border-t border-[#ece5d8]/10 px-2 pb-2 pt-3 leading-relaxed text-white/72">
-                        <p>
-                          キャラ別の参考平均手数は
-                          <span className="font-medium text-[#ece5d8]">
-                            全プレイの単純平均
-                          </span>
-                          です（勝ち・負け・ゴースト敗北を含み、
-                          <span className="font-medium text-[#ece5d8]">降参は 7 手</span>
-                          として計上）。
-                        </p>
-                        <p>
-                          <span className="font-semibold text-[#ece5d8]">
-                            累計レート（lifetime_total_rate）
-                          </span>
-                          は敗北や週次の減点では
-                          <span className="font-medium text-emerald-200/90">減りません</span>
-                          。勝ちで増えた分だけ上がります（ランク表示の基準）。上限は
-                          <span className="tabular-nums font-medium text-amber-200/95">
-                            9999
-                          </span>
-                          です。週次レートの上限は従来どおりです。
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="pb-0">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPatchSection((s) => (s === "rate" ? null : "rate"))
-                      }
-                      className="w-full rounded-lg px-2 py-2 text-left text-sm font-semibold text-amber-200/95 transition hover:bg-white/[0.06]"
-                      aria-expanded={patchSection === "rate"}
-                    >
-                      レート増減の目安
-                    </button>
-                    {patchSection === "rate" && (
-                      <div className="mt-2 border-t border-[#ece5d8]/10 px-2 pb-2 pt-3 text-[0.8125rem] leading-relaxed text-white/72 sm:text-sm">
-                        <p className="font-semibold text-[#ece5d8]">
-                          キャラ平均手数がちょうど 4 手のとき
-                        </p>
-                        <p className="mt-1.5 text-white/65">
-                          週次レートの「勝ち」は{" "}
-                          <span className="font-mono text-[0.7rem] text-white/80 sm:text-xs">
-                            +6 + max(0, 平均−自分の手数)×2
-                          </span>
-                          （＋ゴーストがいる場合はさらに{" "}
-                          <span className="font-mono text-[0.7rem] text-white/80 sm:text-xs">
-                            max(0, ゴースト手数−自分の手数)×2
-                          </span>
-                          ）。平均が 4 のときの増分だけ抜き出すと次のとおりです。
-                        </p>
-                        <div className="mt-2 overflow-x-auto">
-                          <table className="w-full min-w-[16rem] border-collapse text-left text-[0.8125rem] tabular-nums sm:text-sm">
-                            <thead>
-                              <tr className="border-b border-[#ece5d8]/20 text-[#ece5d8]/90">
-                                <th className="py-1 pr-3 font-medium">
-                                  正解までの手数
-                                </th>
-                                <th className="py-1 font-medium">
-                                  週次レート増分（勝ち）
-                                </th>
-                              </tr>
-                            </thead>
-                            <tbody className="text-white/80">
-                              <tr className="border-b border-white/5">
-                                <td className="py-1 pr-3">1</td>
-                                <td className="text-emerald-200/95">+12</td>
-                              </tr>
-                              <tr className="border-b border-white/5">
-                                <td className="py-1 pr-3">2</td>
-                                <td className="text-emerald-200/95">+10</td>
-                              </tr>
-                              <tr className="border-b border-white/5">
-                                <td className="py-1 pr-3">3</td>
-                                <td className="text-emerald-200/95">+8</td>
-                              </tr>
-                              <tr className="border-b border-white/5">
-                                <td className="py-1 pr-3">4</td>
-                                <td className="text-emerald-200/95">+6</td>
-                              </tr>
-                              <tr className="border-b border-white/5">
-                                <td className="py-1 pr-3">5〜7</td>
-                                <td className="text-emerald-200/95">
-                                  +6（平均より遅いので速度ボーナスなし）
-                                </td>
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                        <p className="mt-3 text-white/65">
-                          <span className="font-semibold text-rose-300/90">負け</span>
-                          （不正解・降参・手数切れ・ゴースト敗北など）の週次レート減少は、
-                          <span className="font-medium text-[#ece5d8]">
-                            そのラウンドで何手使ったかではなく
-                          </span>
-                          、いまのシーズンレートと期待勝率{" "}
-                          <span className="font-mono text-[0.7rem] text-white/80 sm:text-xs">
-                            E
-                          </span>{" "}
-                          だけで決まります（手数 1〜7 で式は同じ）。相手レート 1500・自分の週次レートが
-                          1500 のときは{" "}
-                          <span className="tabular-nums text-rose-200/95">約 −16</span>
-                          、2000 のときは{" "}
-                          <span className="tabular-nums text-rose-200/95">約 −30</span>
-                          （いずれも{" "}
-                          <span className="font-mono text-[0.65rem] text-white/70 sm:text-xs">
-                            K=32
-                          </span>
-                          ・上限クリップ前）。
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
+                リアルタイム対戦
+              </a>
             </div>
 
             <p className="mt-3 text-center text-[0.8125rem] font-medium leading-snug text-amber-300/95 sm:text-sm">
@@ -954,38 +511,6 @@ export default function Home() {
                 >
                   チャット
                 </button>
-                {guesses.length === 0 && (
-                  <div
-                    className="flex min-w-0 flex-1 justify-center px-1"
-                    role="group"
-                    aria-label="対戦モードと個人モードの切り替え"
-                  >
-                    <div className="inline-flex rounded-xl border border-[#ece5d8]/25 bg-[#0a0f1e]/90 p-0.5">
-                      <button
-                        type="button"
-                        onClick={() => setBattleModeVs(true)}
-                        className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition sm:px-3 sm:text-sm ${
-                          battleModeVs
-                            ? "bg-[#ece5d8]/15 text-[#ece5d8]"
-                            : "text-white/45 hover:text-white/70"
-                        }`}
-                      >
-                        対戦
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setBattleModeVs(false)}
-                        className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition sm:px-3 sm:text-sm ${
-                          !battleModeVs
-                            ? "bg-[#ece5d8]/15 text-[#ece5d8]"
-                            : "text-white/45 hover:text-white/70"
-                        }`}
-                      >
-                        個人
-                      </button>
-                    </div>
-                  </div>
-                )}
                 <button
                   type="button"
                   onClick={resign}
@@ -1085,7 +610,7 @@ export default function Home() {
               プレイヤー名の変更
             </h2>
             <p className="mt-1 text-sm text-white/55">
-              2〜12文字。ランキングに表示されます。
+              2〜12文字。チャットなどに表示されます。
             </p>
             <input
               value={nameDraft}
@@ -1130,31 +655,12 @@ export default function Home() {
               id="result-title"
               className="text-center text-lg font-semibold text-[#ece5d8]"
             >
-              {won ? "正解" : lostToGhost ? "ゴーストに敗北" : "不正解"}
+              {won ? "正解" : "不正解"}
             </h2>
             <p className="mt-1 text-center text-sm text-white/50">答え</p>
             <p className="mt-2 text-center text-3xl font-bold tracking-tight text-white">
               {target.name}
             </p>
-
-            {ratingStats?.lifetimeTierPromoted &&
-              !ratingStats.alreadySubmitted &&
-              ratingStats.promotedToRankLabel && (
-                <div
-                  className="mt-5 rounded-xl border border-amber-400/45 bg-gradient-to-br from-amber-950/55 via-[#12182a] to-emerald-950/40 px-4 py-4 text-center shadow-[0_0_28px_-8px_rgba(251,191,36,0.35)]"
-                  role="status"
-                >
-                  <p className="text-[0.7rem] font-semibold uppercase tracking-[0.2em] text-amber-200/95">
-                    ティア昇格
-                  </p>
-                  <p className="mt-2 text-xl font-bold tracking-tight text-[#ece5d8] sm:text-2xl">
-                    {ratingStats.promotedToRankLabel}
-                  </p>
-                  <p className="mt-1.5 text-xs text-white/50">
-                    累計レートの到達で新しいティア／ランク帯に到達しました
-                  </p>
-                </div>
-              )}
 
             {ratingStats != null &&
               typeof ratingStats.characterAverageHands === "number" && (
@@ -1230,40 +736,21 @@ export default function Home() {
                       このラウンドはすでに記録済みです
                     </p>
                   ) : (
-                    <>
-                      <p
-                        className={`mt-2 text-2xl font-bold tabular-nums tracking-tight sm:text-3xl ${
-                          ratingStats.delta >= 0
-                            ? "text-emerald-100"
-                            : "text-rose-100"
-                        }`}
-                      >
-                        レート：{Math.round(ratingStats.before)} →{" "}
-                        {Math.round(ratingStats.after)}
-                        <span className="ml-2 text-xl sm:text-2xl">
-                          (
-                          {ratingStats.delta >= 0 ? "+" : ""}
-                          {Math.round(ratingStats.delta)})
-                        </span>
-                      </p>
-                      {typeof ratingStats.goldEarned === "number" &&
-                        ratingStats.goldEarned > 0 && (
-                          <p className="mt-3 flex items-center justify-center gap-1.5 text-sm text-amber-200/90">
-                            <span>+</span>
-                            <GoldCoinIcon className="h-[1.15em] w-[1.15em] shrink-0 align-[-0.12em] text-amber-200/95" />
-                            <span className="tabular-nums">
-                              {ratingStats.goldEarned.toLocaleString("ja-JP")}
-                              （累計{" "}
-                              {typeof ratingStats.goldTotal === "number"
-                                ? Math.round(
-                                    ratingStats.goldTotal
-                                  ).toLocaleString("ja-JP")
-                                : "—"}
-                              ）
-                            </span>
-                          </p>
-                        )}
-                    </>
+                    <p
+                      className={`mt-2 text-2xl font-bold tabular-nums tracking-tight sm:text-3xl ${
+                        ratingStats.delta >= 0
+                          ? "text-emerald-100"
+                          : "text-rose-100"
+                      }`}
+                    >
+                      レート：{Math.round(ratingStats.before)} →{" "}
+                      {Math.round(ratingStats.after)}
+                      <span className="ml-2 text-xl sm:text-2xl">
+                        (
+                        {ratingStats.delta >= 0 ? "+" : ""}
+                        {Math.round(ratingStats.delta)})
+                      </span>
+                    </p>
                   )}
                 </div>
               )}
@@ -1275,13 +762,7 @@ export default function Home() {
               </p>
             )}
 
-            {!won && lostToGhost && (
-              <p className="mt-4 text-center text-sm leading-relaxed text-rose-300/90">
-                ゴーストの正解手数を超えたため敗北です。
-              </p>
-            )}
-
-            {!won && !surrendered && !lostToGhost && (
+            {!won && !surrendered && (
               <p className="mt-4 text-center text-sm text-white/60">
                 手数切れです。
               </p>

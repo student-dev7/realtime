@@ -12,7 +12,6 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
   getFirestore,
   limit,
@@ -27,13 +26,6 @@ import {
   ensureAnonymousSession,
   getFirebaseAuth,
 } from "../lib/firebaseClient";
-import { RankLogoMark } from "./RankLogoMark";
-import { DEFAULT_INITIAL_RATING } from "../lib/elo";
-import {
-  formatRankTierLine,
-  getRankData,
-  rateForRankDisplay,
-} from "../lib/rankUtils";
 import { isAdminUid } from "../lib/adminUids";
 import { validateDisplayName } from "../lib/validateDisplayName";
 
@@ -92,11 +84,6 @@ export function ChatRoomPanel(props: {
   const [myUid, setMyUid] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [clearingAll, setClearingAll] = useState(false);
-  /** uid → 累計レート由来のランク表示ラベル（再レンダー用に tick と併用） */
-  const rankLabelRef = useRef<Record<string, string>>({});
-  /** ランクロゴ用（rateForRankDisplay 済みの累計レート） */
-  const rankDisplayRatingRef = useRef<Record<string, number | undefined>>({});
-  const [rankLabelsTick, setRankLabelsTick] = useState(0);
 
   const unsubRef = useRef<(() => void) | null>(null);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -196,61 +183,6 @@ export function ChatRoomPanel(props: {
       setConnected(false);
     };
   }, [reconnectKey]);
-
-  useEffect(() => {
-    const uids = [
-      ...new Set(messages.map((m) => m.uid).filter((u) => u.length > 0)),
-    ];
-    const missing = uids.filter((uid) => rankLabelRef.current[uid] === undefined);
-    if (missing.length === 0) return;
-
-    let cancelled = false;
-    void (async () => {
-      try {
-        const auth = getFirebaseAuth();
-        const db = getFirestore(auth.app);
-        await Promise.all(
-          missing.map(async (uid) => {
-            try {
-              const snap = await getDoc(doc(db, "users", uid));
-              let lt = DEFAULT_INITIAL_RATING;
-              if (snap.exists()) {
-                const d = snap.data() as {
-                  lifetime_total_rate?: unknown;
-                  rating?: unknown;
-                };
-                if (
-                  typeof d.lifetime_total_rate === "number" &&
-                  Number.isFinite(d.lifetime_total_rate)
-                ) {
-                  lt = d.lifetime_total_rate;
-                } else if (
-                  typeof d.rating === "number" &&
-                  Number.isFinite(d.rating)
-                ) {
-                  lt = d.rating;
-                }
-              }
-              const displayRate = rateForRankDisplay(lt);
-              rankDisplayRatingRef.current[uid] = displayRate;
-              rankLabelRef.current[uid] = formatRankTierLine(
-                getRankData(displayRate)
-              );
-            } catch {
-              rankLabelRef.current[uid] = "—";
-              rankDisplayRatingRef.current[uid] = undefined;
-            }
-          })
-        );
-        if (!cancelled) setRankLabelsTick((t) => t + 1);
-      } catch {
-        /* ignore */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [messages]);
 
   const send = useCallback(async () => {
     const raw = input.trim();
@@ -370,8 +302,6 @@ export function ChatRoomPanel(props: {
     }
   }, [myUid, clearingAll, bumpActivity]);
 
-  void rankLabelsTick;
-
   return (
     <div
       className="fixed inset-0 z-[115] flex items-end justify-center bg-black/55 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-[2px] sm:items-center sm:p-4"
@@ -459,24 +389,6 @@ export function ChatRoomPanel(props: {
                   <span className="font-medium text-[#ece5d8]/95">
                     {m.displayName}
                   </span>
-                  {rankLabelRef.current[m.uid] && (
-                    <span className="flex min-w-0 max-w-[min(100%,13rem)] items-center gap-1">
-                      {rankDisplayRatingRef.current[m.uid] != null &&
-                        rankLabelRef.current[m.uid] !== "—" && (
-                          <RankLogoMark
-                            rating={rankDisplayRatingRef.current[m.uid]!}
-                            sizePx={15}
-                            className="shrink-0"
-                          />
-                        )}
-                      <span
-                        className="min-w-0 truncate text-[0.9375rem] font-semibold leading-tight text-amber-200/85"
-                        title={rankLabelRef.current[m.uid]}
-                      >
-                        {rankLabelRef.current[m.uid]}
-                      </span>
-                    </span>
-                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <span className="text-[0.65rem] tabular-nums text-white/40">

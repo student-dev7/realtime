@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import {
   createContext,
   useCallback,
@@ -290,12 +289,6 @@ export function AdminModeProvider({
                           Firebase コンソール
                         </a>
                       ) : null}
-                      <Link
-                        href="/ranking"
-                        className="rounded border border-amber-400/40 px-2 py-0.5 text-[11px] hover:bg-amber-500/20"
-                      >
-                        ランキング
-                      </Link>
                     </li>
                   </ul>
                   <button

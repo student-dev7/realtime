@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import {
   doc,
-  getDoc,
   increment,
   runTransaction,
   serverTimestamp,
@@ -19,16 +18,9 @@ import {
   DEFAULT_INITIAL_RATING,
   expectedScore,
 } from "@/lib/elo";
-import { getPublicFirestore } from "@/lib/firebasePublicFirestore";
 import { withUserFirestore } from "@/lib/firebaseUserFirestore";
 import { getUidFromIdToken } from "@/lib/identityToolkit";
 import { getRatingWeekMondayKeyJst } from "@/lib/ratingWeek";
-import { goldEarnedFromRatingDelta } from "@/lib/gold";
-import {
-  formatRankTierLine,
-  getRankData,
-  isLifetimeTierOrRankPromoted,
-} from "@/lib/rankUtils";
 import { isAdminUid } from "@/lib/adminUids";
 import { validateDisplayName } from "@/lib/validateDisplayName";
 
@@ -40,44 +32,14 @@ type SubmitBody = {
   characterName: string;
   roundId: string;
   displayName: string;
-  /** /api/get-ghost が返した runs のドキュメント ID（検証用） */
-  ghostRunId?: string;
-  /** ゴーストの手数に達しても未正解のときの即敗北（サーバーで ghost と照合） */
-  lostToGhost?: boolean;
   /** 降参した場合 true（キャラ統計の手数は 7 手として計上） */
   surrendered?: boolean;
-  /** 個人モード: 週次・累計レート・ゴールドは変えない */
-  personalMode?: boolean;
 };
 
 /** 降参・手数切れなど won:false の runs 記録用ペナルティ手数 */
 const LOSS_RECORD_HANDS = 7;
 const MAX_GUESSES_ROUND = 7;
 const MIN_GUESSES_TO_RESIGN = 4;
-
-async function resolveGhostHandCount(
-  characterName: string,
-  ghostRunId: string | undefined
-): Promise<number | undefined> {
-  if (!ghostRunId) return undefined;
-  const trimmed = ghostRunId.trim();
-  if (trimmed.length < 5 || trimmed.length > 1900) return undefined;
-  try {
-    const db = getPublicFirestore();
-    const snap = await getDoc(doc(db, "runs", trimmed));
-    if (!snap.exists()) return undefined;
-    const gd = snap.data() as Record<string, unknown>;
-    if (gd.characterName !== characterName) return undefined;
-    if (gd.won !== true) return undefined;
-    const hc = gd.handCount;
-    if (typeof hc !== "number" || !Number.isFinite(hc)) return undefined;
-    const rounded = Math.round(hc);
-    if (rounded < 1 || rounded > MAX_GUESSES_ROUND) return undefined;
-    return rounded;
-  } catch {
-    return undefined;
-  }
-}
 
 function readSeasonRate(data: Record<string, unknown> | undefined): number {
   if (!data) return DEFAULT_INITIAL_RATING;
@@ -111,11 +73,9 @@ export async function POST(req: Request) {
     characterName,
     roundId,
     displayName: rawDisplayName,
-    ghostRunId: rawGhostRunId,
   } = body ?? ({} as SubmitBody);
 
   const surrendered = body.surrendered === true;
-  const personalMode = body.personalMode === true;
 
   if (!idToken || typeof idToken !== "string") {
     return NextResponse.json(
@@ -150,22 +110,18 @@ export async function POST(req: Request) {
     );
   }
 
-  const lostToGhostClaim = body.lostToGhost === true;
-
   if (
     !won &&
     guessCount < MIN_GUESSES_TO_RESIGN &&
     guessCount !== MAX_GUESSES_ROUND
   ) {
-    if (!lostToGhostClaim) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "降参は4回以上予想してから可能です（手数切れを除く）",
-        },
-        { status: 400 }
-      );
-    }
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "降参は4回以上予想してから可能です（手数切れを除く）",
+      },
+      { status: 400 }
+    );
   }
 
   if (won && Math.round(rawHandCount) !== guessCount) {
@@ -178,17 +134,6 @@ export async function POST(req: Request) {
   if (surrendered && won) {
     return NextResponse.json(
       { ok: false, error: "surrendered cannot be true when won" },
-      { status: 400 }
-    );
-  }
-
-  if (
-    personalMode &&
-    (lostToGhostClaim ||
-      (typeof rawGhostRunId === "string" && rawGhostRunId.trim().length > 0))
-  ) {
-    return NextResponse.json(
-      { ok: false, error: "personalMode はゴーストと併用できません" },
       { status: 400 }
     );
   }
@@ -233,30 +178,7 @@ export async function POST(req: Request) {
   const currentWeekKey = getRatingWeekMondayKeyJst();
 
   try {
-    const ghostHc = personalMode
-      ? undefined
-      : await resolveGhostHandCount(
-          characterName,
-          typeof rawGhostRunId === "string" ? rawGhostRunId : undefined
-        );
-
-    if (lostToGhostClaim) {
-      if (
-        typeof rawGhostRunId !== "string" ||
-        !rawGhostRunId.trim() ||
-        ghostHc === undefined ||
-        won ||
-        guessCount <= ghostHc
-      ) {
-        return NextResponse.json(
-          { ok: false, error: "Invalid lostToGhost" },
-          { status: 400 }
-        );
-      }
-    }
-
     const storedHandCount = won ? Math.max(1, rawHandCount) : LOSS_RECORD_HANDS;
-    /** キャラ別平均: 勝ちは実手数、降参は 7 手、他の負けは実際の予想回数（勝敗・敗北種別すべて集計） */
     const statHandCountForCharacter = won
       ? Math.max(1, Math.round(rawHandCount))
       : surrendered
@@ -276,14 +198,6 @@ export async function POST(req: Request) {
       return runTransaction(db, async (tx) => {
         const existingRun = await tx.get(runRef);
         if (existingRun.exists()) {
-          const userSnapDup = await tx.get(userRef);
-          const goldTotalDup =
-            userSnapDup.exists() &&
-            typeof userSnapDup.data()?.gold === "number" &&
-            Number.isFinite(userSnapDup.data()?.gold as number)
-              ? (userSnapDup.data()?.gold as number)
-              : 0;
-
           const charStatsSnapDup = await tx.get(charStatsRef);
           const thDup = charStatsSnapDup.exists()
             ? (charStatsSnapDup.data()?.totalHandCount as number | undefined) ??
@@ -326,9 +240,6 @@ export async function POST(req: Request) {
             weeklyResetApplied: Boolean(data.weeklyResetApplied),
             guessCount,
             characterStatsUpdated: false,
-            goldEarned: 0,
-            goldTotal: goldTotalDup,
-            lifetimeTierPromoted: false,
           };
         }
 
@@ -352,7 +263,7 @@ export async function POST(req: Request) {
         const lifetimeTotal = readLifetimeTotal(userData);
 
         let weeklyResetApplied = false;
-        if (!personalMode && userSnap.exists()) {
+        if (userSnap.exists()) {
           const storedKey = userData?.ratingWeekKey as string | undefined;
           if (storedKey !== undefined && storedKey !== currentWeekKey) {
             Rp = DEFAULT_INITIAL_RATING;
@@ -364,43 +275,23 @@ export async function POST(req: Request) {
           ? (userSnap.data()?.games as number | undefined) ?? 0
           : 0;
 
-        const goldBefore =
-          userSnap.exists() &&
-          typeof userSnap.data()?.gold === "number" &&
-          Number.isFinite(userSnap.data()?.gold as number)
-            ? (userSnap.data()?.gold as number)
-            : 0;
-
         let newRating: number;
         let ratingDelta: number;
         let eloActualScore: number;
         let eloExpected: number;
         let winBaseBonus: number | undefined;
         let winSpeedBonus: number | undefined;
-        let ghostBeatBonus: number | undefined;
 
-        if (personalMode) {
-          newRating = Rp;
-          ratingDelta = 0;
-          eloActualScore = 0;
-          eloExpected = expectedScore(Rp, DEFAULT_INITIAL_RATING);
-          winBaseBonus = undefined;
-          winSpeedBonus = undefined;
-          ghostBeatBonus = undefined;
-        } else if (won) {
+        if (won) {
           const win = applyWinRatingBonus(
             Rp,
             averageHandCount,
-            storedHandCount,
-            ghostHc !== undefined
-              ? { ghostHandCount: ghostHc }
-              : undefined
+            storedHandCount
           );
           newRating = win.newRating;
           ratingDelta = win.ratingDelta;
           winBaseBonus = win.baseBonus;
           winSpeedBonus = win.speedBonus;
-          ghostBeatBonus = win.ghostBeatBonus;
           eloActualScore = 1;
           eloExpected = expectedScore(Rp, DEFAULT_INITIAL_RATING);
         } else {
@@ -413,51 +304,23 @@ export async function POST(req: Request) {
 
         const gamesAfter = gamesBefore + 1;
 
-        const goldEarned = personalMode
-          ? 0
-          : goldEarnedFromRatingDelta(ratingDelta);
-        const goldTotal = goldBefore + goldEarned;
+        const newLifetimeTotal = clampLifetimeTotalRate(
+          lifetimeTotal + Math.max(0, ratingDelta)
+        );
 
-        /** 累計は減らさない（負け・減点時は週次のみ反映）。個人モードは累計も変えない */
-        const newLifetimeTotal = personalMode
-          ? lifetimeTotal
-          : clampLifetimeTotalRate(
-              lifetimeTotal + Math.max(0, ratingDelta)
-            );
-
-        const lifetimeTierPromoted =
-          !personalMode &&
-          isLifetimeTierOrRankPromoted(lifetimeTotal, newLifetimeTotal);
-        const promotedToRankLabel = lifetimeTierPromoted
-          ? formatRankTierLine(getRankData(newLifetimeTotal))
-          : undefined;
-
-        if (personalMode) {
-          tx.set(
-            userRef,
-            {
-              displayName,
-              games: gamesAfter,
-              updatedAt: serverTimestamp(),
-            },
-            { merge: true }
-          );
-        } else {
-          tx.set(
-            userRef,
-            {
-              current_rate: newRating,
-              lifetime_total_rate: newLifetimeTotal,
-              rating: newRating,
-              games: gamesAfter,
-              displayName,
-              ratingWeekKey: currentWeekKey,
-              updatedAt: serverTimestamp(),
-              ...(goldEarned > 0 ? { gold: increment(goldEarned) } : {}),
-            },
-            { merge: true }
-          );
-        }
+        tx.set(
+          userRef,
+          {
+            current_rate: newRating,
+            lifetime_total_rate: newLifetimeTotal,
+            rating: newRating,
+            games: gamesAfter,
+            displayName,
+            ratingWeekKey: currentWeekKey,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
 
         tx.set(
           runRef,
@@ -475,14 +338,10 @@ export async function POST(req: Request) {
             playerRatingAfter: newRating,
             weeklyResetApplied,
             characterStatsUpdated: shouldIncrementCharacterStats,
-            goldEarned,
-            goldTotalAfter: goldTotal,
-            personalMode,
-            ...(won && !personalMode
+            ...(won
               ? {
                   winBaseBonus: winBaseBonus ?? 6,
                   winSpeedBonus: winSpeedBonus ?? 0,
-                  ghostBeatBonus: ghostBeatBonus ?? 0,
                 }
               : {}),
             createdAt: serverTimestamp(),
@@ -527,10 +386,6 @@ export async function POST(req: Request) {
           characterStatsUpdated: shouldIncrementCharacterStats,
           winBaseBonus,
           winSpeedBonus,
-          goldEarned,
-          goldTotal,
-          lifetimeTierPromoted,
-          promotedToRankLabel,
         };
       });
     });

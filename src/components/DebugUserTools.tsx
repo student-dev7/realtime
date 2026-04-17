@@ -25,7 +25,6 @@ export function DebugUserTools() {
   const [open, setOpen] = useState(false);
   const [seasonDraft, setSeasonDraft] = useState("");
   const [lifetimeDraft, setLifetimeDraft] = useState("");
-  const [goldDraft, setGoldDraft] = useState("");
   const [loadingDoc, setLoadingDoc] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -48,7 +47,6 @@ export function DebugUserTools() {
       if (!snap.exists()) {
         setSeasonDraft(String(DEFAULT_INITIAL_RATING));
         setLifetimeDraft(String(DEFAULT_INITIAL_RATING));
-        setGoldDraft("0");
         return;
       }
       const d = snap.data();
@@ -65,11 +63,8 @@ export function DebugUserTools() {
           : typeof d?.rating === "number" && Number.isFinite(d.rating)
             ? d.rating
             : DEFAULT_INITIAL_RATING;
-      const g =
-        typeof d?.gold === "number" && Number.isFinite(d.gold) ? d.gold : 0;
       setSeasonDraft(String(Math.round(season)));
       setLifetimeDraft(String(Math.round(lifetime)));
-      setGoldDraft(String(Math.round(g)));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -96,12 +91,7 @@ export function DebugUserTools() {
       }
       const season = Number(seasonDraft);
       const lifetime = Number(lifetimeDraft);
-      const g = Number(goldDraft);
-      if (
-        !Number.isFinite(season) ||
-        !Number.isFinite(lifetime) ||
-        !Number.isFinite(g)
-      ) {
+      if (!Number.isFinite(season) || !Number.isFinite(lifetime)) {
         setError("数値が不正です");
         return;
       }
@@ -114,7 +104,6 @@ export function DebugUserTools() {
           current_rate: cr,
           lifetime_total_rate: lt,
           rating: cr,
-          gold: Math.max(0, g),
           updatedAt: serverTimestamp(),
         },
         { merge: true }
@@ -126,7 +115,7 @@ export function DebugUserTools() {
     } finally {
       setSaving(false);
     }
-  }, [seasonDraft, lifetimeDraft, goldDraft]);
+  }, [seasonDraft, lifetimeDraft]);
 
   if (!showAdminTools) return null;
 
@@ -196,17 +185,6 @@ export function DebugUserTools() {
                   inputMode="numeric"
                   value={lifetimeDraft}
                   onChange={(e) => setLifetimeDraft(e.target.value)}
-                  disabled={loadingDoc}
-                  className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-sm tabular-nums text-white outline-none focus:border-rose-400/50"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs text-white/60">ゴールド</span>
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  value={goldDraft}
-                  onChange={(e) => setGoldDraft(e.target.value)}
                   disabled={loadingDoc}
                   className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-sm tabular-nums text-white outline-none focus:border-rose-400/50"
                 />
