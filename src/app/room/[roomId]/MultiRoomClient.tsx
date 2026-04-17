@@ -540,7 +540,7 @@ export function MultiRoomClient(props: Props) {
               </span>
             </div>
             <p className="mt-2 text-[0.7rem] text-white/45">
-              タイマーは端末ローカル。確定（タップ）またはタイムアウト時のみサーバーへ送信します。
+              タイマーは端末ローカル。30秒以内に選ばないと不正解と同様に1手消費します（7手制は残り−1、無制限は手数のみ加算）。
             </p>
           </section>
 

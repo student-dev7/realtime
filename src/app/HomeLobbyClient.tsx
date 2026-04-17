@@ -2,10 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { getFirestore } from "firebase/firestore";
-import {
-  createRoom,
-  listPublicLobbies,
-} from "@/lib/multiplayer/roomFirestore";
+import { listPublicLobbies } from "@/lib/multiplayer/roomFirestore";
+import { MAX_TOTAL_ROOMS } from "@/lib/multiplayer/roomLimits";
 import type { HandMode, MultiplayerRoomDoc } from "@/lib/multiplayer/types";
 import {
   ensureAnonymousSession,
@@ -104,17 +102,30 @@ export function HomeLobbyClient() {
       const auth = getFirebaseAuth();
       const uid = auth.currentUser?.uid;
       if (!uid) throw new Error("ログインに失敗しました");
-      const db = getFirestore(auth.app);
-      const code = await createRoom({
-        db,
-        uid,
-        displayName: v.name,
-        roomName,
-        isPublic,
-        joinPassword,
-        maxPlayers,
-        handMode,
+      const idToken = await auth.currentUser.getIdToken();
+      const res = await fetch("/api/create-room", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken,
+          displayName: v.name,
+          roomName,
+          isPublic,
+          joinPassword,
+          maxPlayers,
+          handMode,
+        }),
       });
+      const data = (await res.json()) as { code?: string; error?: string };
+      if (!res.ok) {
+        throw new Error(
+          typeof data.error === "string" ? data.error : "作成に失敗しました"
+        );
+      }
+      const code = data.code;
+      if (!code || typeof code !== "string") {
+        throw new Error("作成に失敗しました");
+      }
       persistName(v.name);
       window.location.href = `/room/${code}`;
     } catch (e) {
@@ -326,7 +337,11 @@ export function HomeLobbyClient() {
           </select>
         </label>
         <p className="mt-2 text-[0.7rem] text-white/45">
-          1手あたり30秒の個人タイマー（端末ローカル）。タイムアウトはミス1回分としてサーバーにのみ送信します。
+          1手あたり30秒の個人タイマー（端末ローカル）。時間内に選ばないと不正解と同様に1手消費（7手制では残り手数が1減ります）。
+        </p>
+        <p className="mt-1 text-[0.7rem] text-white/40">
+          サーバー上のルーム数は最大 {MAX_TOTAL_ROOMS}
+          件です。超える場合は古い部屋から自動削除されます。
         </p>
         <button
           type="button"
