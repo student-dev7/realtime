@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getUidFromIdToken } from "@/lib/identityToolkit";
+import { getUidFromVerifiedIdToken } from "@/lib/verifyIdTokenServer";
 import { isAdminUid } from "@/lib/adminUids";
 import { createRoomWithAdmin } from "@/lib/multiplayer/roomAdmin";
 import type { HandMode } from "@/lib/multiplayer/types";
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "idToken が必要です" }, { status: 400 });
   }
 
-  const uid = await getUidFromIdToken(idToken);
+  const uid = await getUidFromVerifiedIdToken(idToken);
   if (!uid) {
     return NextResponse.json({ error: "認証に失敗しました" }, { status: 401 });
   }

@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { isAdminUid } from "@/lib/adminUids";
-import { getUidFromIdToken } from "@/lib/identityToolkit";
+import { getUidFromVerifiedIdToken } from "@/lib/verifyIdTokenServer";
 
 function verifyPasswordConstantTime(input: string, expected: string): boolean {
   const a = createHash("sha256").update(input, "utf8").digest();
@@ -29,7 +29,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const uid = await getUidFromIdToken(idToken);
+  const uid = await getUidFromVerifiedIdToken(idToken);
   if (!uid || !isAdminUid(uid)) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }

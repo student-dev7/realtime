@@ -19,7 +19,7 @@ import {
   expectedScore,
 } from "@/lib/elo";
 import { withUserFirestore } from "@/lib/firebaseUserFirestore";
-import { getUidFromIdToken } from "@/lib/identityToolkit";
+import { getUidFromVerifiedIdToken } from "@/lib/verifyIdTokenServer";
 import { getRatingWeekMondayKeyJst } from "@/lib/ratingWeek";
 import { isAdminUid } from "@/lib/adminUids";
 import { validateDisplayName } from "@/lib/validateDisplayName";
@@ -151,7 +151,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const uid = await getUidFromIdToken(idToken);
+  const uid = await getUidFromVerifiedIdToken(idToken);
   if (!uid) {
     return NextResponse.json(
       { ok: false, error: "Invalid or expired idToken" },

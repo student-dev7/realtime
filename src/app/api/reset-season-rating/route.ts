@@ -1,7 +1,7 @@
 import { doc, serverTimestamp, setDoc } from "firebase/firestore";
 import { NextResponse } from "next/server";
 import { DEFAULT_INITIAL_RATING } from "@/lib/elo";
-import { getUidFromIdToken } from "@/lib/identityToolkit";
+import { getUidFromVerifiedIdToken } from "@/lib/verifyIdTokenServer";
 import { getRatingWeekMondayKeyJst } from "@/lib/ratingWeek";
 import { withUserFirestore } from "@/lib/firebaseUserFirestore";
 
@@ -29,7 +29,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const uid = await getUidFromIdToken(idToken);
+    const uid = await getUidFromVerifiedIdToken(idToken);
     if (!uid) {
       return NextResponse.json(
         { ok: false, error: "Invalid or expired idToken" },

@@ -1,8 +1,9 @@
 import { getFirebaseWebConfig } from "./firebaseWebConfig";
 
 /**
- * Firebase JS SDK のみ運用時、サーバーで ID トークンを検証して uid を得る。
- * Identity Toolkit REST（Web API キー使用・サービスアカウント不要）。
+ * Identity Toolkit REST（Web API キー）で uid を得る。
+ * Next.js API ルートでは **使わないこと**（Vercel からの呼び出しは HTTP リファラ制限で失敗し得る）。
+ * サーバー側は `verifyIdTokenServer.ts` の `getUidFromVerifiedIdToken` を使う。
  */
 export async function getUidFromIdToken(idToken: string): Promise<string | null> {
   const { apiKey } = getFirebaseWebConfig();
